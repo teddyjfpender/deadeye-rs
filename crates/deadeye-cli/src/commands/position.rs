@@ -66,7 +66,7 @@ async fn sell(ctx: &AppContext, args: PositionSellArgs, confirm: bool) -> Result
 
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
     let label = family_label(family);
 
@@ -199,7 +199,7 @@ async fn show(
     let family = if let Some(f) = family_override {
         f.as_sdk()
     } else {
-        super::markets::detect_family(&client, market).await?
+        super::runtime_resolver::detect_family(ctx, &client, market).await?
     };
 
     // Every family now uses the trade-lot (multi-leg) model: enumerate the
@@ -412,7 +412,7 @@ async fn value(ctx: &AppContext, args: PositionValueArgs) -> Result<()> {
     let client = ctx.deadeye_client()?;
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
 
     let mut view = PositionValueView {
@@ -478,12 +478,17 @@ async fn value(ctx: &AppContext, args: PositionValueArgs) -> Result<()> {
             let mkt = client.lognormal_market(market);
             let at = match (args.at, args.belief) {
                 (Some(x), _) => Some(x),
+                // Default settlement point: the LINEAR-space median exp(μ).
+                // `mean()` returns the log-space μ, but trade_lot_value_at
+                // consumes a linear x — feeding μ directly valued every leg
+                // at x ≈ ln-scale ≈ 0 payout (issue #38 review).
                 (None, None) => Some(
                     mkt.distribution()
                         .await
                         .context("reading distribution")?
                         .mean()
-                        .to_f64(),
+                        .to_f64()
+                        .exp(),
                 ),
                 (None, Some(_)) => None,
             };

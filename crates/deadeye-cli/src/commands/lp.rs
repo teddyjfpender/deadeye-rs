@@ -33,7 +33,7 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
     let client = deadeye_sdk::DeadeyeClient::new(provider);
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
     let label = family_label(family);
 
@@ -116,7 +116,9 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
                 deadeye_starknet::OwnedAccount,
             >::new;
             anyhow::bail!(
-                "lp_add is not yet wired for multinoulli markets (no `add_liquidity` on the writer)"
+                "lp_add is not yet wired for multinoulli markets (no `add_liquidity` on the \
+                 writer). The AMM's add_liquidity entrypoint is byte-identical across \
+                 families, so `--family normal` works as a stopgap"
             );
         },
         Family::Bivariate => {
@@ -155,7 +157,7 @@ async fn remove(ctx: &AppContext, args: LpRemoveArgs, confirm: bool) -> Result<(
     let client = deadeye_sdk::DeadeyeClient::new(provider);
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
     let label = family_label(family);
 
@@ -231,7 +233,9 @@ async fn remove(ctx: &AppContext, args: LpRemoveArgs, confirm: bool) -> Result<(
         Family::Multinoulli => {
             let _ = (writer_provider_for_write, account, share_amount);
             anyhow::bail!(
-                "lp_remove is not yet wired for multinoulli markets (no `remove_liquidity` on the writer)"
+                "lp_remove is not yet wired for multinoulli markets (no `remove_liquidity` on \
+                 the writer). The AMM's remove_liquidity entrypoint is byte-identical across \
+                 families, so `--family normal` works as a stopgap"
             );
         },
         Family::Bivariate => {

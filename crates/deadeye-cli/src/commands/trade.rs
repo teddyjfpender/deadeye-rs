@@ -40,14 +40,165 @@ use crate::{
 /// the on-chain Q128.128 `collateral_sufficient` check rejects a supply that
 /// equals the f64 estimate on any rounding gap. 5% comfortably covers the
 /// fixed-point delta while staying close to the webapp's buffered collateral.
-const COLLATERAL_BUFFER: f64 = 1.05;
+pub(crate) const COLLATERAL_BUFFER: f64 = 1.05;
 
 pub(crate) async fn run(action: TradeCmd, ctx: &AppContext, confirm: bool) -> Result<()> {
     match action {
         TradeCmd::Quote(args) => quote(ctx, args).await,
         TradeCmd::Execute(args) => execute(ctx, args, confirm).await,
+        TradeCmd::Loop(args) => super::trade_loop::run(ctx, args, confirm).await,
         TradeCmd::Journal(args) => journal_cmd(ctx, args),
     }
+}
+
+// ─── shared candidate solving (quote / execute / loop) ─────────────────
+
+/// EV-max candidate solved from a state snapshot plus the sizing policy
+/// (issue #33): fractional-Kelly stake cap, then the `--max-cvar` budget
+/// walk-down. Pure f64 — zero RPC; re-optimising at smaller budgets reuses
+/// the snapshot.
+pub(crate) struct NormalSolve {
+    /// The optimizer's chain-bit-exact quote at the final effective budget.
+    pub(crate) quote: deadeye_starknet::NormalTradeQuote,
+    /// Optimizer expected value (XP) under the belief.
+    pub(crate) expected_value: f64,
+    /// Which constraint bound the stake (`budget`, `kelly-…`, `cvar-cap`).
+    pub(crate) sizing_basis: String,
+}
+
+/// Outcome of [`solve_normal_candidate`]: the CVaR-unreachable case is typed
+/// so `trade loop` can journal it as a skip while `quote`/`execute` keep
+/// treating it as a hard error.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "short-lived, one per solve — boxing the quote buys nothing"
+)]
+pub(crate) enum NormalSolveOutcome {
+    /// A candidate was found at the final effective budget.
+    Solved(NormalSolve),
+    /// Even the smallest viable stake violates the `--max-cvar` cap.
+    CvarUnreachable {
+        /// 5% CVaR (XP, negative = loss) of the smallest stake tried.
+        cvar: f64,
+        /// The configured cap that could not be met.
+        max_cvar: f64,
+    },
+}
+
+impl NormalSolveOutcome {
+    /// Unwrap as a solve, converting CVaR-unreachable into the historical
+    /// `trade quote` / `trade execute` error message.
+    pub(crate) fn into_solve(self) -> Result<NormalSolve> {
+        match self {
+            Self::Solved(s) => Ok(s),
+            Self::CvarUnreachable { cvar, max_cvar } => anyhow::bail!(
+                "--max-cvar {max_cvar} XP is unreachable: the smallest viable \
+                 stake still has 5% CVaR {cvar:.4} XP — raise --max-cvar or \
+                 shrink the belief distance"
+            ),
+        }
+    }
+}
+
+/// Shared by `trade quote`, `trade quote --from-state`, `trade execute`
+/// and `trade loop` so every path sizes stakes identically.
+pub(crate) fn solve_normal_candidate(
+    snapshot: &deadeye_sdk::normal::NormalMarketStateSnapshot,
+    belief_mean: f64,
+    belief_sigma: f64,
+    budget: f64,
+    bankroll: Option<f64>,
+    kelly_mult: Option<f64>,
+    max_cvar: Option<f64>,
+) -> Result<NormalSolveOutcome> {
+    let quote_at = |b: f64| {
+        deadeye_sdk::normal::optimize_quote_from_state(snapshot, belief_mean, belief_sigma, b)
+            .context("optimize_quote_offline")
+    };
+    let (mut q, mut ev) = quote_at(budget)?;
+    let mut basis = "budget".to_owned();
+    let mut eff = budget;
+    let required = Sq128::from_raw(q.required_collateral).to_f64();
+    if let Some((cap, kelly_basis)) =
+        super::risk::kelly_stake_cap(bankroll, kelly_mult, ev, required)?
+        && cap < required
+    {
+        eff = cap;
+        basis = kelly_basis;
+        (q, ev) = quote_at(eff)?;
+    }
+    if let Some(max_cvar) = max_cvar {
+        anyhow::ensure!(max_cvar > 0.0, "--max-cvar must be > 0");
+        for _ in 0..40 {
+            let cm = Sq128::from_raw(q.candidate.mean).to_f64();
+            let cs = Sq128::from_raw(q.candidate.sigma).to_f64();
+            let cvar = super::risk::cvar_under_belief(
+                snapshot.mean,
+                snapshot.sigma,
+                cm,
+                cs,
+                snapshot.effective_k,
+                belief_mean,
+                belief_sigma,
+                0.05,
+            );
+            if !cvar.is_finite() || cvar >= -max_cvar {
+                break;
+            }
+            eff *= 0.75;
+            basis = "cvar-cap".to_owned();
+            let (q2, ev2) = quote_at(eff)?;
+            if Sq128::from_raw(q2.required_collateral).to_f64() <= 0.0 {
+                return Ok(NormalSolveOutcome::CvarUnreachable { cvar, max_cvar });
+            }
+            (q, ev) = (q2, ev2);
+        }
+    }
+    Ok(NormalSolveOutcome::Solved(NormalSolve {
+        quote: q,
+        expected_value: ev,
+        sizing_basis: basis,
+    }))
+}
+
+/// Lognormal twin of [`solve_normal_candidate`]: EV-max grid search plus the
+/// fractional-Kelly stake cap. Belief is in LOG space. (Each optimize call
+/// reads 3 views — the lognormal path has no cached snapshot type yet.)
+/// Returns `(result, sizing_basis, kelly_cap)` — the cap is `Some` when the
+/// fractional-Kelly rule bound the stake.
+pub(crate) async fn solve_lognormal_candidate(
+    handle: &deadeye_sdk::lognormal::LognormalMarket<'_, CliProvider>,
+    belief_mu: f64,
+    belief_sigma: f64,
+    budget: f64,
+    bankroll: Option<f64>,
+    kelly_mult: Option<f64>,
+) -> Result<(
+    deadeye_sdk::lognormal::LognormalOptimizationResult,
+    String,
+    Option<f64>,
+)> {
+    let mut sizing_basis = "budget".to_owned();
+    let mut kelly_cap = None;
+    let mut result = handle
+        .optimize_quote_offline_ev(belief_mu, belief_sigma, budget)
+        .await
+        .map_err(|e| anyhow::anyhow!("optimize_quote_offline_ev (lognormal): {e}"))?;
+    if let Some((cap, kelly_basis)) = super::risk::kelly_stake_cap(
+        bankroll,
+        kelly_mult,
+        result.expected_value,
+        result.collateral_required,
+    )? && cap < result.collateral_required
+    {
+        sizing_basis = kelly_basis;
+        kelly_cap = Some(cap);
+        result = handle
+            .optimize_quote_offline_ev(belief_mu, belief_sigma, cap)
+            .await
+            .map_err(|e| anyhow::anyhow!("optimize_quote_offline_ev (lognormal): {e}"))?;
+    }
+    Ok((result, sizing_basis, kelly_cap))
 }
 
 // ─── quote ────────────────────────────────────────────────────────────
@@ -56,13 +207,13 @@ pub(crate) async fn quote(ctx: &AppContext, args: TradeQuoteArgs) -> Result<()> 
     // Fetch-once path (issue #14): a saved snapshot makes the quote PURE —
     // zero RPC, so exploring N candidates costs one read total.
     if let Some(path) = &args.from_state {
-        let result = quote_normal_from_state(path, &args)?;
+        let result = quote_normal_from_state(ctx, path, &args)?;
         return ctx.renderer.print(&result);
     }
     let market = parse_felt("market address", &args.market)?;
     let provider = build_provider(ctx)?;
     let client = DeadeyeClient::new(provider);
-    let family = resolve_family(&client, market, args.family).await?;
+    let family = resolve_family(ctx, &client, market, args.family).await?;
 
     let result = match family {
         Family::Normal => quote_normal(&client, market, family, &args).await?,
@@ -182,14 +333,61 @@ fn compute_risk_extras(
 /// Pure quote from a saved snapshot (issue #14): zero RPC. Mirrors the
 /// offline branches of `quote_normal`, sourcing state from the JSON that
 /// `deadeye markets snapshot` produced instead of three live view calls.
-fn quote_normal_from_state(path: &std::path::Path, args: &TradeQuoteArgs) -> Result<QuoteResult> {
-    use deadeye_sdk::normal::{
-        NormalMarketStateSnapshot, optimize_quote_from_state, quote_candidate_from_state,
-    };
+fn quote_normal_from_state(
+    ctx: &AppContext,
+    path: &std::path::Path,
+    args: &TradeQuoteArgs,
+) -> Result<QuoteResult> {
+    use deadeye_sdk::normal::{NormalMarketStateSnapshot, quote_candidate_from_state};
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading state snapshot {}", path.display()))?;
     let snapshot: NormalMarketStateSnapshot = serde_json::from_str(&raw)
         .context("parsing state snapshot (expected `deadeye markets snapshot` JSON)")?;
+    // Family gate (issue #38). Snapshots that pre-date the `family` field
+    // CANNOT be trusted to be normal: the pre-fix `markets snapshot` happily
+    // snapshotted lognormal markets through the wire-identical normal reader,
+    // silently emitting log-space values — and production is lognormal-heavy.
+    // Refuse unless the operator explicitly asserts `--family normal`.
+    let untyped: serde_json::Value = serde_json::from_str(&raw)
+        .context("parsing state snapshot (expected `deadeye markets snapshot` JSON)")?;
+    if untyped.get("family").is_none() {
+        if args.family == Some(crate::cli::FamilyArg::Normal) {
+            ctx.renderer.warning(
+                "state snapshot pre-dates family stamping (issue #38) — proceeding on \
+                 your explicit --family normal assertion; re-take it with \
+                 `deadeye markets snapshot` to silence this",
+            );
+        } else {
+            anyhow::bail!(
+                "state snapshot {} pre-dates family stamping (issue #38) and cannot be \
+                 trusted to be normal-family — pre-fix snapshots of LOGNORMAL markets \
+                 look identical and quote garbage. Re-take it with `deadeye markets \
+                 snapshot {}`, or pass `--family normal` to assert it really is a \
+                 normal market",
+                path.display(),
+                snapshot.market,
+            );
+        }
+    }
+    if snapshot.family != Family::Normal {
+        anyhow::bail!(
+            "state snapshot {} is for a {} market; --from-state currently supports the \
+             normal family only — quote it live instead: `deadeye trade quote {} --family {}`",
+            path.display(),
+            family_label(snapshot.family),
+            snapshot.market,
+            family_label(snapshot.family),
+        );
+    }
+    if let Some(flag) = args.family {
+        let flagged = super::runtime_resolver::family_from_arg(flag);
+        anyhow::ensure!(
+            flagged == snapshot.family,
+            "--family {} contradicts the state snapshot, which was taken from a {} market",
+            family_label(flagged),
+            family_label(snapshot.family),
+        );
+    }
     let market_mean = snapshot.mean;
     let market_sigma = snapshot.sigma;
 
@@ -199,60 +397,23 @@ fn quote_normal_from_state(path: &std::path::Path, args: &TradeQuoteArgs) -> Res
     let (quote, belief, budget, expected_value, sizing_basis) =
         if let (Some(belief_mean), Some(budget)) = (args.belief, args.budget) {
             let belief_sigma = args.belief_sigma.unwrap_or(market_sigma);
-            let quote_at = |b: f64| {
-                optimize_quote_from_state(&snapshot, belief_mean, belief_sigma, b)
-                    .map_err(|e| anyhow::anyhow!("optimize_quote_from_state: {e}"))
-            };
             // Sizing policy (issue #33) — pure re-quotes, zero RPC.
-            let (mut q, mut ev) = quote_at(budget)?;
-            let mut basis = "budget".to_owned();
-            let mut eff = budget;
-            let required = Sq128::from_raw(q.required_collateral).to_f64();
-            if let Some((cap, kelly_basis)) =
-                super::risk::kelly_stake_cap(args.bankroll, kelly_mult, ev, required)?
-                && cap < required
-            {
-                eff = cap;
-                basis = kelly_basis;
-                (q, ev) = quote_at(eff)?;
-            }
-            if let Some(max_cvar) = args.max_cvar {
-                anyhow::ensure!(max_cvar > 0.0, "--max-cvar must be > 0");
-                for _ in 0..40 {
-                    let cm = Sq128::from_raw(q.candidate.mean).to_f64();
-                    let cs = Sq128::from_raw(q.candidate.sigma).to_f64();
-                    let cvar = super::risk::cvar_under_belief(
-                        market_mean,
-                        market_sigma,
-                        cm,
-                        cs,
-                        snapshot.effective_k,
-                        belief_mean,
-                        belief_sigma,
-                        0.05,
-                    );
-                    if !cvar.is_finite() || cvar >= -max_cvar {
-                        break;
-                    }
-                    eff *= 0.75;
-                    basis = "cvar-cap".to_owned();
-                    let (q2, ev2) = quote_at(eff)?;
-                    if Sq128::from_raw(q2.required_collateral).to_f64() <= 0.0 {
-                        anyhow::bail!(
-                            "--max-cvar {max_cvar} XP is unreachable: the smallest viable \
-                             stake still has 5% CVaR {cvar:.4} XP — raise --max-cvar or \
-                             shrink the belief distance"
-                        );
-                    }
-                    (q, ev) = (q2, ev2);
-                }
-            }
+            let solve = solve_normal_candidate(
+                &snapshot,
+                belief_mean,
+                belief_sigma,
+                budget,
+                args.bankroll,
+                kelly_mult,
+                args.max_cvar,
+            )?
+            .into_solve()?;
             (
-                q,
+                solve.quote,
                 Some((belief_mean, belief_sigma)),
                 Some(budget),
-                Some(ev),
-                Some(basis),
+                Some(solve.expected_value),
+                Some(solve.sizing_basis),
             )
         } else {
             let mean = args
@@ -376,59 +537,21 @@ async fn quote_normal(
                 // Sizing policy (issue #33): the belief is never touched; the
                 // stake is capped by re-optimising at a smaller budget, and
                 // `sizing_basis` names whichever constraint bound.
-                let quote_at = |b: f64| {
-                    deadeye_sdk::normal::optimize_quote_from_state(
-                        &snapshot,
-                        belief_mean,
-                        belief_sigma,
-                        b,
-                    )
-                    .context("optimize_quote_offline")
-                };
-                let (mut q, mut ev) = quote_at(budget)?;
-                let mut basis = "budget".to_owned();
-                let mut eff = budget;
-                let required = Sq128::from_raw(q.required_collateral).to_f64();
-                if let Some((cap, kelly_basis)) =
-                    super::risk::kelly_stake_cap(args.bankroll, kelly_mult, ev, required)?
-                    && cap < required
-                {
-                    eff = cap;
-                    basis = kelly_basis;
-                    (q, ev) = quote_at(eff)?;
-                }
-                if let Some(max_cvar) = args.max_cvar {
-                    anyhow::ensure!(max_cvar > 0.0, "--max-cvar must be > 0");
-                    for _ in 0..40 {
-                        let cm = Sq128::from_raw(q.candidate.mean).to_f64();
-                        let cs = Sq128::from_raw(q.candidate.sigma).to_f64();
-                        let cvar = super::risk::cvar_under_belief(
-                            market_mean,
-                            market_sigma,
-                            cm,
-                            cs,
-                            effective_k,
-                            belief_mean,
-                            belief_sigma,
-                            0.05,
-                        );
-                        if !cvar.is_finite() || cvar >= -max_cvar {
-                            break;
-                        }
-                        eff *= 0.75;
-                        basis = "cvar-cap".to_owned();
-                        let (q2, ev2) = quote_at(eff)?;
-                        if Sq128::from_raw(q2.required_collateral).to_f64() <= 0.0 {
-                            anyhow::bail!(
-                                "--max-cvar {max_cvar} XP is unreachable: the smallest viable \
-                                 stake still has 5% CVaR {cvar:.4} XP — raise --max-cvar or \
-                                 shrink the belief distance"
-                            );
-                        }
-                        (q, ev) = (q2, ev2);
-                    }
-                }
-                (q, Some(ev), Some(basis))
+                let solve = solve_normal_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    args.bankroll,
+                    kelly_mult,
+                    args.max_cvar,
+                )?
+                .into_solve()?;
+                (
+                    solve.quote,
+                    Some(solve.expected_value),
+                    Some(solve.sizing_basis),
+                )
             };
             (
                 q,
@@ -792,7 +915,7 @@ pub(crate) async fn execute(ctx: &AppContext, args: TradeExecuteArgs, confirm: b
     let market = parse_felt("market address", &args.market)?;
     let provider = build_provider(ctx)?;
     let client = DeadeyeClient::new(provider);
-    let family = resolve_family(&client, market, args.family).await?;
+    let family = resolve_family(ctx, &client, market, args.family).await?;
     let label = family_label(family);
 
     match family {
@@ -832,65 +955,25 @@ async fn execute_normal(
                 .await
                 .context("reading market state snapshot")?;
             let belief_sigma = args.belief_sigma.unwrap_or(snapshot.sigma);
-            let quote_at = |b: f64| {
-                deadeye_sdk::normal::optimize_quote_from_state(
-                    &snapshot,
-                    belief_mean,
-                    belief_sigma,
-                    b,
-                )
-                .context("optimize_quote_offline")
-            };
-            let (mut q, mut ev) = quote_at(budget)?;
             // Sizing policy (issue #33) — same semantics as `trade quote`:
             // the belief never changes; the stake is capped by re-optimising
             // at a smaller budget.
             let kelly_mult = args
                 .kelly
                 .or_else(|| args.risk.as_deref().and_then(super::risk::preset_fraction));
-            let mut eff = budget;
-            let mut basis = "budget".to_owned();
-            let required0 = Sq128::from_raw(q.required_collateral).to_f64();
-            if let Some((cap, kelly_basis)) =
-                super::risk::kelly_stake_cap(args.bankroll, kelly_mult, ev, required0)?
-                && cap < required0
-            {
-                eff = cap;
-                basis = kelly_basis;
-                (q, ev) = quote_at(eff)?;
-            }
-            if let Some(max_cvar) = args.max_cvar {
-                anyhow::ensure!(max_cvar > 0.0, "--max-cvar must be > 0");
-                for _ in 0..40 {
-                    let cm = Sq128::from_raw(q.candidate.mean).to_f64();
-                    let cs = Sq128::from_raw(q.candidate.sigma).to_f64();
-                    let cvar = super::risk::cvar_under_belief(
-                        snapshot.mean,
-                        snapshot.sigma,
-                        cm,
-                        cs,
-                        snapshot.effective_k,
-                        belief_mean,
-                        belief_sigma,
-                        0.05,
-                    );
-                    if !cvar.is_finite() || cvar >= -max_cvar {
-                        break;
-                    }
-                    eff *= 0.75;
-                    basis = "cvar-cap".to_owned();
-                    let (q2, ev2) = quote_at(eff)?;
-                    if Sq128::from_raw(q2.required_collateral).to_f64() <= 0.0 {
-                        anyhow::bail!(
-                            "--max-cvar {max_cvar} XP is unreachable: the smallest viable \
-                             stake still has 5% CVaR {cvar:.4} XP — raise --max-cvar or \
-                             shrink the belief distance"
-                        );
-                    }
-                    (q, ev) = (q2, ev2);
-                }
-            }
-            let _ = eff;
+            let solve = solve_normal_candidate(
+                &snapshot,
+                belief_mean,
+                belief_sigma,
+                budget,
+                args.bankroll,
+                kelly_mult,
+                args.max_cvar,
+            )?
+            .into_solve()?;
+            let q = solve.quote;
+            let ev = solve.expected_value;
+            let basis = &solve.sizing_basis;
             let required = Sq128::from_raw(q.required_collateral).to_f64();
             if !q.on_chain_will_accept || required <= 0.0 {
                 anyhow::bail!(
@@ -911,6 +994,90 @@ async fn execute_normal(
         ),
     };
 
+    let opts = NormalSubmitOptions {
+        max_collateral: args.max_collateral,
+        dry_run: args.dry_run,
+        runtime,
+        x_star_override: args.x_star,
+        journal: args.journal.clone(),
+        interactive: true,
+        confirm,
+        label,
+    };
+    match submit_normal_quote(ctx, client, market, mean, variance, &opts).await? {
+        SubmitOutcome::CeilingExceeded { message } => anyhow::bail!(message),
+        SubmitOutcome::PreflightRejected(result)
+        | SubmitOutcome::DryRun(result)
+        | SubmitOutcome::Submitted { result, .. } => ctx.renderer.print(&result),
+    }
+}
+
+/// Knobs for [`submit_normal_quote`] / [`submit_lognormal_quote`].
+#[derive(Clone)]
+pub(crate) struct NormalSubmitOptions {
+    /// Hard ceiling (XP) on the gross collateral the trade may supply.
+    pub(crate) max_collateral: f64,
+    /// Simulate the multicall gas-free and stop (never submits).
+    pub(crate) dry_run: bool,
+    /// Optional math-runtime address (chain-faithful preflight for normal;
+    /// diagnostic probe fallback for lognormal).
+    pub(crate) runtime: Option<Felt>,
+    /// Diagnostic x* override (hidden flag; bypasses the chain probe).
+    pub(crate) x_star_override: Option<f64>,
+    /// Canonical trade-journal path to append on successful submission.
+    pub(crate) journal: Option<std::path::PathBuf>,
+    /// Allow the interactive confirm prompt (TTY + non-JSON). The trade
+    /// loop passes `false`: its own `--execute` flag is the standing
+    /// consent and a long-running loop must never block on stdin.
+    pub(crate) interactive: bool,
+    /// Global `--confirm` (skips the prompt when `interactive`).
+    pub(crate) confirm: bool,
+    /// Family label for the prompt text.
+    pub(crate) label: &'static str,
+}
+
+/// Typed result of a submit pipeline, so callers (the `trade execute`
+/// renderer and the `trade loop` journal) can react without string-matching
+/// `anyhow` prose.
+pub(crate) enum SubmitOutcome {
+    /// Preflight rejected the candidate — nothing was sent.
+    PreflightRejected(SubmissionResult),
+    /// Dry run: the multicall was simulated gas-free and nothing was sent.
+    DryRun(SubmissionResult),
+    /// The (chain-certified) collateral requirement exceeds `max_collateral`.
+    /// Nothing was sent; `trade execute` renders this as a hard error, the
+    /// loop as a skip.
+    CeilingExceeded {
+        /// Human-readable explanation, preserved from the historical bail.
+        message: String,
+    },
+    /// A transaction was submitted; check `result.accepted` / `tx_hash`.
+    Submitted {
+        /// Render-ready submission verdict.
+        result: SubmissionResult,
+        /// Gross collateral supplied (XP) — what budget accounting must count.
+        supplied_gross_xp: f64,
+        /// Chain-certified net requirement (XP).
+        required_net_xp: f64,
+    },
+}
+
+/// Submit pipeline for a fixed normal candidate: offline (or runtime)
+/// preflight → collateral buffer sizing → chain-probe x* certification →
+/// fresh-wallet grant bundling → optional dry-run → submission + journal.
+/// Extracted from `trade execute` so `trade loop` runs the **identical**
+/// path (issue #40).
+pub(crate) async fn submit_normal_quote(
+    ctx: &AppContext,
+    client: &DeadeyeClient<CliProvider>,
+    market: Felt,
+    mean: f64,
+    variance: f64,
+    opts: &NormalSubmitOptions,
+) -> Result<SubmitOutcome> {
+    let market_handle = client.normal_market(market);
+    let runtime = opts.runtime;
+
     let mut quote = if let Some(rt) = runtime {
         let cand_dist = deadeye_core::NormalDistribution::from_variance(
             Sq128::from_f64(mean)?,
@@ -926,7 +1093,7 @@ async fn execute_normal(
         )
         .map_err(|e| anyhow::anyhow!("off-chain collateral solver: {e}"))?;
         let x_star = Sq128::from_f64(solver.x_min)?.to_raw();
-        let supplied = Sq128::from_f64(args.max_collateral)?.to_raw();
+        let supplied = Sq128::from_f64(opts.max_collateral)?.to_raw();
         market_handle
             .reader()
             .quote_trade(rt, candidate, x_star, supplied, supplied)
@@ -951,32 +1118,32 @@ async fn execute_normal(
     if runtime.is_none() && quote.on_chain_will_accept {
         let required = Sq128::from_raw(quote.required_collateral).to_f64();
         let target = required * COLLATERAL_BUFFER;
-        let supplied = if args.max_collateral >= target {
+        let supplied = if opts.max_collateral >= target {
             target
-        } else if args.max_collateral >= required {
-            args.max_collateral
+        } else if opts.max_collateral >= required {
+            opts.max_collateral
         } else {
-            anyhow::bail!(
-                "--max-collateral {:.4} is below the required collateral {:.4}; \
-                 raise it to at least ~{:.4} (required × {COLLATERAL_BUFFER}) so the \
-                 on-chain collateral check clears",
-                args.max_collateral,
-                required,
-                target,
-            );
+            return Ok(SubmitOutcome::CeilingExceeded {
+                message: format!(
+                    "--max-collateral {:.4} is below the required collateral {:.4}; \
+                     raise it to at least ~{:.4} (required × {COLLATERAL_BUFFER}) so the \
+                     on-chain collateral check clears",
+                    opts.max_collateral, required, target,
+                ),
+            });
         };
         quote.padded_collateral = Sq128::from_f64(supplied)?.to_raw();
     }
 
     // Diagnostic override of x* (collateral point) to probe the on-chain
     // verifier's stationary check.
-    if let Some(xs) = args.x_star {
+    if let Some(xs) = opts.x_star_override {
         quote.x_star = Sq128::from_f64(xs)?.to_raw();
     }
 
     if !quote.on_chain_will_accept {
         let rejection = quote.rejection.as_ref().map(pretty_rejection);
-        let result = SubmissionResult {
+        return Ok(SubmitOutcome::PreflightRejected(SubmissionResult {
             action: "trade",
             market: format!("{market:#x}"),
             tx_hash: None,
@@ -984,8 +1151,7 @@ async fn execute_normal(
             accepted: false,
             rejection,
             note: Some("preflight rejected — fix the cause and re-quote before retrying".into()),
-        };
-        return ctx.renderer.print(&result);
+        }));
     }
 
     let account = build_owned_account(ctx)?;
@@ -1000,7 +1166,7 @@ async fn execute_normal(
     // x* still reverts with VERIFICATION_FAILED. Probe `check_trade_view`
     // (gas-free, simulated against the market's own runtime class) around the
     // f64 root and adopt the x* + collateral the chain itself certifies.
-    if args.x_star.is_none() {
+    if opts.x_star_override.is_none() {
         match deadeye_starknet::chain_probe::refine_normal_quote(
             writer.account(),
             writer.reader(),
@@ -1022,14 +1188,16 @@ async fn execute_normal(
                 let net_needed = chain_required.max(min_trade);
                 let gross_needed = net_needed / outcome.net_rate;
                 let buffered = gross_needed * 1.002;
-                if buffered > args.max_collateral {
-                    anyhow::bail!(
-                        "chain-verified collateral is {net_needed:.4} XP net \
-                         (≈{buffered:.4} XP gross incl. deposit fees and the {min_trade:.4} \
-                         XP minimum-trade floor), which exceeds --max-collateral {:.4}; \
-                         raise the ceiling",
-                        args.max_collateral,
-                    );
+                if buffered > opts.max_collateral {
+                    return Ok(SubmitOutcome::CeilingExceeded {
+                        message: format!(
+                            "chain-verified collateral is {net_needed:.4} XP net \
+                             (≈{buffered:.4} XP gross incl. deposit fees and the {min_trade:.4} \
+                             XP minimum-trade floor), which exceeds --max-collateral {:.4}; \
+                             raise the ceiling",
+                            opts.max_collateral,
+                        ),
+                    });
                 }
                 quote.x_star = outcome.x_star;
                 quote.required_collateral = outcome.computed_collateral;
@@ -1080,11 +1248,13 @@ async fn execute_normal(
         Err(_) => Vec::new(),
     };
 
-    if !args.dry_run
-        && !confirm
+    if opts.interactive
+        && !opts.dry_run
+        && !opts.confirm
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && ctx.renderer.mode() != OutputMode::Json
     {
+        let label = opts.label;
         eprintln!("About to submit {label}-market trade:");
         eprintln!("  market:    {market:#x}");
         eprintln!(
@@ -1104,7 +1274,7 @@ async fn execute_normal(
     }
 
     // `--dry-run`: simulate the full multicall gas-free and stop.
-    if args.dry_run {
+    if opts.dry_run {
         let mut calls = leading.clone();
         calls.extend(
             writer
@@ -1113,19 +1283,25 @@ async fn execute_normal(
                 .map_err(|e| anyhow::anyhow!("build trade calls: {e}"))?,
         );
         let result = dry_run_render(market, writer.account(), &calls).await;
-        return ctx.renderer.print(&result);
+        return Ok(SubmitOutcome::DryRun(result));
     }
 
+    let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
+    let required_net_xp = Sq128::from_raw(quote.required_collateral).to_f64();
     let result = match writer.execute_quote_bundled(quote, leading).await {
         Ok(receipt) => {
-            if let Some(path) = &args.journal {
+            if let Some(path) = &opts.journal {
                 let _ = append_normal_journal(path, market, &writer, &quote, receipt);
             }
             submission_from_receipt("trade", format!("{market:#x}"), receipt)
         },
         Err(e) => submission_from_trade_error("trade", format!("{market:#x}"), &e),
     };
-    ctx.renderer.print(&result)
+    Ok(SubmitOutcome::Submitted {
+        result,
+        supplied_gross_xp,
+        required_net_xp,
+    })
 }
 
 /// Decide whether the trade multicall needs a leading `claim_initial_grant()`
@@ -1183,12 +1359,6 @@ async fn execute_lognormal(
     // were rejected as SideInvalid/StationaryInvalid before the probe that
     // would have certified them ever ran.)
     let runtime = resolve_runtime_opt(args.runtime.as_deref(), Family::Lognormal)?;
-    let reader = LognormalMarketReader::new(client.provider(), market);
-
-    let current = reader
-        .distribution()
-        .await
-        .map_err(|e| anyhow::anyhow!("reading market distribution: {e}"))?;
 
     // Candidate: explicit log-space --mean/--variance, or the same EV-max
     // optimizer `trade quote --belief/--budget` runs (issue #32) — so the
@@ -1202,31 +1372,30 @@ async fn execute_lognormal(
                 "--max-cvar is normal-family only for now (lognormal risk extras are not \
                  yet wired)"
             );
+            let reader = LognormalMarketReader::new(client.provider(), market);
+            let current = reader
+                .distribution()
+                .await
+                .map_err(|e| anyhow::anyhow!("reading market distribution: {e}"))?;
             let market_sigma = deadeye_core::Distribution::sigma(&current).to_f64();
             let belief_sigma = args.belief_sigma.unwrap_or(market_sigma);
             let handle = client.lognormal_market(market);
             let kelly_mult = args
                 .kelly
                 .or_else(|| args.risk.as_deref().and_then(super::risk::preset_fraction));
-            let mut result = handle
-                .optimize_quote_offline_ev(belief_mu, belief_sigma, budget)
-                .await
-                .map_err(|e| anyhow::anyhow!("optimize_quote_offline_ev (lognormal): {e}"))?;
-            // Fractional-Kelly stake cap (issue #33), mirroring `trade quote`.
-            if let Some((cap, basis)) = super::risk::kelly_stake_cap(
+            let (result, basis, kelly_cap) = solve_lognormal_candidate(
+                &handle,
+                belief_mu,
+                belief_sigma,
+                budget,
                 args.bankroll,
                 kelly_mult,
-                result.expected_value,
-                result.collateral_required,
-            )? && cap < result.collateral_required
+            )
+            .await?;
+            if let Some(cap) = kelly_cap
+                && ctx.renderer.mode() != OutputMode::Json
             {
-                if ctx.renderer.mode() != OutputMode::Json {
-                    eprintln!("sizing: {basis} caps the stake at {cap:.4} XP");
-                }
-                result = handle
-                    .optimize_quote_offline_ev(belief_mu, belief_sigma, cap)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("optimize_quote_offline_ev (lognormal): {e}"))?;
+                eprintln!("sizing: {basis} caps the stake at {cap:.4} XP");
             }
             if result.collateral_required <= 0.0 {
                 anyhow::bail!(
@@ -1255,7 +1424,45 @@ async fn execute_lognormal(
         ),
     };
 
-    let supplied = Sq128::from_f64(args.max_collateral)?.to_raw();
+    let opts = NormalSubmitOptions {
+        max_collateral: args.max_collateral,
+        dry_run: args.dry_run,
+        runtime,
+        x_star_override: None,
+        journal: args.journal.clone(),
+        interactive: true,
+        confirm,
+        label,
+    };
+    match submit_lognormal_quote(ctx, client, market, mean, variance, &opts).await? {
+        SubmitOutcome::CeilingExceeded { message } => anyhow::bail!(message),
+        SubmitOutcome::PreflightRejected(result)
+        | SubmitOutcome::DryRun(result)
+        | SubmitOutcome::Submitted { result, .. } => ctx.renderer.print(&result),
+    }
+}
+
+/// Submit pipeline for a fixed lognormal candidate (log-space mean/variance):
+/// off-chain draft → **mandatory** chain-probe x* + hints certification (with
+/// a runtime-verifier diagnostic fallback) → fresh-wallet grant bundling →
+/// optional dry-run → submission + journal. Extracted from `trade execute`
+/// so `trade loop` runs the identical path (issue #40).
+pub(crate) async fn submit_lognormal_quote(
+    ctx: &AppContext,
+    client: &DeadeyeClient<CliProvider>,
+    market: Felt,
+    mean: f64,
+    variance: f64,
+    opts: &NormalSubmitOptions,
+) -> Result<SubmitOutcome> {
+    let runtime = opts.runtime;
+    let reader = LognormalMarketReader::new(client.provider(), market);
+    let current = reader
+        .distribution()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading market distribution: {e}"))?;
+
+    let supplied = Sq128::from_f64(opts.max_collateral)?.to_raw();
 
     // Off-chain draft: solve x* with the f64 lognormal minimiser; the
     // hints + chain-exact x*/collateral come from the probe below.
@@ -1316,13 +1523,15 @@ async fn execute_lognormal(
             let net_needed = chain_required.max(min_trade);
             let gross_needed = net_needed / outcome.net_rate;
             let buffered = gross_needed * 1.002;
-            if buffered > args.max_collateral {
-                anyhow::bail!(
-                    "chain-verified collateral is {net_needed:.4} XP net (≈{buffered:.4} XP \
-                     gross incl. deposit fees and the {min_trade:.4} XP minimum-trade floor), \
-                     which exceeds --max-collateral {:.4}; raise the ceiling",
-                    args.max_collateral,
-                );
+            if buffered > opts.max_collateral {
+                return Ok(SubmitOutcome::CeilingExceeded {
+                    message: format!(
+                        "chain-verified collateral is {net_needed:.4} XP net (≈{buffered:.4} XP \
+                         gross incl. deposit fees and the {min_trade:.4} XP minimum-trade floor), \
+                         which exceeds --max-collateral {:.4}; raise the ceiling",
+                        opts.max_collateral,
+                    ),
+                });
             }
             quote.x_star = outcome.x_star;
             quote.candidate_hints = outcome.candidate_hints;
@@ -1351,6 +1560,20 @@ async fn execute_lognormal(
                 if q.on_chain_will_accept {
                     quote.candidate_hints = q.candidate_hints;
                     quote.required_collateral = q.required_collateral;
+                    // Size the supply like the probe-success path instead of
+                    // leaving the FULL --max-collateral ceiling in place:
+                    // buffered requirement (≥ the min-trade floor), clamped
+                    // to the ceiling. Collateral is a returned margin lock,
+                    // but budget accounting must reflect what is locked.
+                    let required = Sq128::from_raw(q.required_collateral).to_f64();
+                    let min_trade = match reader.params().await {
+                        Ok(p) => Sq128::from_raw(p.min_trade_collateral).to_f64(),
+                        Err(_) => 0.0,
+                    };
+                    let buffered = (required.max(min_trade) * COLLATERAL_BUFFER)
+                        .min(opts.max_collateral)
+                        .max(required);
+                    quote.padded_collateral = Sq128::from_f64(buffered)?.to_raw();
                     ctx.renderer.warning(
                         "chain probe could not certify an x*, but the runtime verifier accepts \
                          the f64 root — submitting the runtime-validated quote (the pre-submit \
@@ -1358,7 +1581,7 @@ async fn execute_lognormal(
                     );
                 } else {
                     let rejection = q.rejection.as_ref().map(pretty_rejection);
-                    let result = SubmissionResult {
+                    return Ok(SubmitOutcome::PreflightRejected(SubmissionResult {
                         action: "trade",
                         market: format!("{market:#x}"),
                         tx_hash: None,
@@ -1370,8 +1593,7 @@ async fn execute_lognormal(
                              rejects the candidate — adjust it (e.g. a smaller move) and retry"
                                 .into(),
                         ),
-                    };
-                    return ctx.renderer.print(&result);
+                    }));
                 }
             } else {
                 match probe_miss {
@@ -1407,11 +1629,13 @@ async fn execute_lognormal(
         Err(_) => Vec::new(),
     };
 
-    if !args.dry_run
-        && !confirm
+    if opts.interactive
+        && !opts.dry_run
+        && !opts.confirm
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && ctx.renderer.mode() != OutputMode::Json
     {
+        let label = opts.label;
         eprintln!("About to submit {label}-market trade:");
         eprintln!("  market:    {market:#x}");
         eprintln!(
@@ -1431,7 +1655,7 @@ async fn execute_lognormal(
     }
 
     // `--dry-run`: simulate the full multicall gas-free and stop.
-    if args.dry_run {
+    if opts.dry_run {
         let mut calls = leading.clone();
         calls.extend(
             writer
@@ -1440,15 +1664,26 @@ async fn execute_lognormal(
                 .map_err(|e| anyhow::anyhow!("build trade calls: {e}"))?,
         );
         let result = dry_run_render(market, writer.account(), &calls).await;
-        return ctx.renderer.print(&result);
+        return Ok(SubmitOutcome::DryRun(result));
     }
 
+    let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
+    let required_net_xp = Sq128::from_raw(quote.required_collateral).to_f64();
     let result = match writer.execute_quote_bundled(quote, leading).await {
-        Ok(receipt) => submission_from_receipt("trade", format!("{market:#x}"), receipt),
+        Ok(receipt) => {
+            // Journal the canonical Trade entry (was dropped pre-#40).
+            if let Some(path) = &opts.journal {
+                let _ = append_lognormal_journal(path, market, &writer, &quote, receipt);
+            }
+            submission_from_receipt("trade", format!("{market:#x}"), receipt)
+        },
         Err(e) => submission_from_trade_error("trade", format!("{market:#x}"), &e),
     };
-    let _ = args.journal;
-    ctx.renderer.print(&result)
+    Ok(SubmitOutcome::Submitted {
+        result,
+        supplied_gross_xp,
+        required_net_xp,
+    })
 }
 
 // ─── journal ──────────────────────────────────────────────────────────
@@ -1543,13 +1778,49 @@ async fn dry_run_render<A: Account>(market: Felt, account: &A, calls: &[Call]) -
     }
 }
 
-fn default_journal_path() -> Result<std::path::PathBuf> {
+pub(crate) fn default_journal_path() -> Result<std::path::PathBuf> {
     let mut dir =
         dirs::data_dir().context("could not locate user data dir; pass --path explicitly")?;
     dir.push("deadeye");
     std::fs::create_dir_all(&dir).ok();
     dir.push("journal.jsonl");
     Ok(dir)
+}
+
+fn append_lognormal_journal<P, A>(
+    path: &std::path::Path,
+    market: Felt,
+    writer: &LognormalMarketWriter<P, A>,
+    quote: &deadeye_starknet::LognormalTradeQuote,
+    receipt: deadeye_starknet::ExecutionReceipt,
+) -> Result<()>
+where
+    P: deadeye_starknet::Provider,
+    A: Account,
+{
+    let mut journal =
+        TradeJournal::open(path).with_context(|| format!("opening journal {}", path.display()))?;
+    let entry = JournalEntry::new(
+        Family::Lognormal,
+        market,
+        Account::address(writer.account()),
+        EntryKind::Trade,
+        json!({
+            "candidate_mu": Sq128::from_raw(quote.candidate.mu).to_f64(),
+            "candidate_variance": Sq128::from_raw(quote.candidate.variance).to_f64(),
+            "x_star": Sq128::from_raw(quote.x_star).to_f64(),
+            "required_collateral": Sq128::from_raw(quote.required_collateral).to_f64(),
+            "padded_collateral": Sq128::from_raw(quote.padded_collateral).to_f64(),
+        }),
+    )
+    .with_tx_hash(receipt.transaction_hash)
+    .with_receipt(json!({
+        "transaction_hash": format!("{:#x}", receipt.transaction_hash),
+        "call_count": receipt.call_count,
+    }));
+    journal
+        .append(&entry)
+        .with_context(|| format!("appending to journal {}", path.display()))
 }
 
 fn append_normal_journal<P, A>(

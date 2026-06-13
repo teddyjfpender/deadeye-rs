@@ -39,6 +39,7 @@ sha2 = { version = "0.10", default-features = false }
 
 # CLI / I/O surface.
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+humantime = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }

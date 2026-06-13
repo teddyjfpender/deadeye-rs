@@ -21,7 +21,7 @@ use crate::{
 
 pub(crate) async fn run(action: MarketsCmd, ctx: &AppContext) -> Result<()> {
     match action {
-        MarketsCmd::Snapshot { address } => snapshot(ctx, &address).await,
+        MarketsCmd::Snapshot { address, family } => snapshot(ctx, &address, family).await,
         MarketsCmd::List { family, limit } => list(ctx, family, limit).await,
         MarketsCmd::Show { address, family } => show(ctx, &address, family).await,
         MarketsCmd::Info { address } => info(ctx, &address).await,
@@ -30,9 +30,55 @@ pub(crate) async fn run(action: MarketsCmd, ctx: &AppContext) -> Result<()> {
 
 /// One-shot quote state snapshot for `trade quote --from-state` (issue #14):
 /// fetch the three views a quote depends on ONCE, emit them bit-exactly.
-async fn snapshot(ctx: &AppContext, address: &str) -> Result<()> {
+///
+/// Family-gated (issue #38): normal and lognormal AMMs answer the same
+/// selectors with the same wire shapes, so snapshotting a lognormal market
+/// through the normal reader "succeeds" while silently emitting log-space
+/// values. Resolve the family first and refuse anything but normal until a
+/// lognormal snapshot type exists.
+async fn snapshot(ctx: &AppContext, address: &str, family: Option<FamilyArg>) -> Result<()> {
     let market = parse_address(address)?;
     let client = ctx.deadeye_client()?;
+    // The snapshot file carries an authoritative `family` stamp that
+    // `trade quote --from-state` later trusts, so an explicit --family flag
+    // is verified against detection whenever detection can conclude — the
+    // flag is only an escape hatch when every detection rung is unavailable,
+    // never a way to launder a wrong guess into a stamped file.
+    let family = match (
+        family,
+        super::runtime_resolver::detect_family(ctx, &client, market).await,
+    ) {
+        (Some(flag), Ok(detected)) => {
+            let flagged = flag.as_sdk();
+            anyhow::ensure!(
+                flagged == detected,
+                "--family {} contradicts detection: {address} is a {} market",
+                super::runtime_resolver::family_label(flagged),
+                super::runtime_resolver::family_label(detected),
+            );
+            detected
+        },
+        (Some(flag), Err(detect_err)) => {
+            ctx.renderer.warning(&format!(
+                "family detection inconclusive ({detect_err:#}); trusting --family {} — \
+                 the snapshot will be stamped with it",
+                super::runtime_resolver::family_label(flag.as_sdk()),
+            ));
+            flag.as_sdk()
+        },
+        (None, Ok(detected)) => detected,
+        (None, Err(e)) => {
+            return Err(e.context(format!("could not auto-detect family for market {address}")));
+        },
+    };
+    if family != Family::Normal {
+        anyhow::bail!(
+            "markets snapshot supports normal markets only today; {address} is a {} market — \
+             quote it live instead: `deadeye trade quote {address} --family {} --belief … --budget …`",
+            super::runtime_resolver::family_label(family),
+            super::runtime_resolver::family_label(family),
+        );
+    }
     let snapshot = client
         .normal_market(market)
         .state_snapshot()
@@ -96,7 +142,7 @@ async fn show(ctx: &AppContext, address: &str, family_override: Option<FamilyArg
     let family = if let Some(f) = family_override {
         f.as_sdk()
     } else {
-        detect_family(&client, market)
+        super::runtime_resolver::detect_family(ctx, &client, market)
             .await
             .with_context(|| format!("could not auto-detect family for market {address}"))?
     };
@@ -117,43 +163,6 @@ async fn info(ctx: &AppContext, address: &str) -> Result<()> {
         .await
         .with_context(|| format!("indexer GET /api/markets/{address} failed"))?;
     ctx.renderer.print(&MarketInfoView { summary })
-}
-
-/// Probe each family's `params()` call until one succeeds.
-pub(crate) async fn detect_family(
-    client: &DeadeyeClient<CliProvider>,
-    market: Felt,
-) -> Result<Family> {
-    // Try in the order most commonly observed in the indexer.
-    if NormalMarketReader::new(client.provider(), market)
-        .params()
-        .await
-        .is_ok()
-    {
-        return Ok(Family::Normal);
-    }
-    if LognormalMarketReader::new(client.provider(), market)
-        .params()
-        .await
-        .is_ok()
-    {
-        return Ok(Family::Lognormal);
-    }
-    if MultinoulliMarketReader::new(client.provider(), market)
-        .params()
-        .await
-        .is_ok()
-    {
-        return Ok(Family::Multinoulli);
-    }
-    if BivariateMarketReader::new(client.provider(), market)
-        .params()
-        .await
-        .is_ok()
-    {
-        return Ok(Family::Bivariate);
-    }
-    anyhow::bail!("no family responded to `get_params` — is the address a Deadeye AMM contract?")
 }
 
 fn params_view(p: AmmParamsRaw) -> MarketParamsView {

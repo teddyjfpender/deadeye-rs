@@ -314,3 +314,223 @@ fn deploy_math_runtime_confirm_without_key_errors_before_deploy() {
         "expected key-required error, got: {stderr}"
     );
 }
+
+// ─── `trade quote --from-state` family gating (issue #38) ───────────────────
+
+/// Build a structurally valid `markets snapshot` JSON fixture. `family` is
+/// injected verbatim when given; `None` produces a legacy (pre-#38) file.
+fn write_snapshot_fixture(
+    dir: &std::path::Path,
+    family: Option<&str>,
+) -> std::path::PathBuf {
+    use deadeye_core::Sq128;
+    let raw = |v: f64| {
+        let r = Sq128::from_f64(v).expect("fixture value converts").to_raw();
+        serde_json::json!({
+            "limb0": r.limb0,
+            "limb1": r.limb1,
+            "limb2": r.limb2,
+            "limb3": r.limb3,
+            "neg": r.neg,
+        })
+    };
+    let mut snap = serde_json::json!({
+        "market": "0xabc",
+        "mean_raw": raw(42.0),
+        "variance_raw": raw(64.0),
+        "sigma_raw": raw(8.0),
+        "base_k_raw": raw(140.0),
+        "initial_backing_raw": raw(1000.0),
+        "pool_backing_raw": raw(1000.0),
+        "mean": 42.0,
+        "sigma": 8.0,
+        "effective_k": 140.0,
+        "pool_backing_xp": 1000.0,
+    });
+    if let Some(f) = family {
+        snap["family"] = serde_json::json!(f);
+    }
+    let path = dir.join("state.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&snap).unwrap()).unwrap();
+    path
+}
+
+/// Hermetic env so the quote never resolves a real config or endpoint.
+fn quote_from_state_cmd(cfg_dir: &std::path::Path) -> Command {
+    let mut cmd = deadeye();
+    cmd.env("DEADEYE_CONFIG", cfg_dir.join("config.toml"))
+        .env("DEADEYE_RPC_URL", "http://127.0.0.1:1/rpc")
+        .env("DEADEYE_INDEXER_URL", "http://127.0.0.1:1/idx")
+        .args(["trade", "quote", "0xabc", "--mean", "43", "--variance", "64"]);
+    cmd
+}
+
+/// A lognormal-stamped snapshot must be refused — quoting it through the
+/// normal math is exactly the bug in issue #38.
+#[test]
+fn from_state_refuses_lognormal_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), Some("lognormal"));
+    quote_from_state_cmd(tmp.path())
+        .args(["--from-state", snap.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("lognormal"));
+}
+
+/// `--from-state` + a contradicting `--family` flag must error instead of
+/// silently quoting the wrong family.
+#[test]
+fn from_state_refuses_contradicting_family_flag() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), Some("normal"));
+    quote_from_state_cmd(tmp.path())
+        .args(["--from-state", snap.to_str().unwrap(), "--family", "lognormal"])
+        .assert()
+        .failure()
+        .stderr(contains("contradicts"));
+}
+
+/// Legacy snapshots (no `family` field) are REFUSED by default — pre-fix
+/// `markets snapshot` happily wrote lognormal markets through the normal
+/// reader, so the file cannot be trusted to be normal-family.
+#[test]
+fn from_state_legacy_snapshot_is_refused_without_assertion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), None);
+    quote_from_state_cmd(tmp.path())
+        .args(["--from-state", snap.to_str().unwrap(), "--output", "json"])
+        .assert()
+        .failure()
+        .stderr(contains("pre-dates family stamping"));
+}
+
+/// An explicit `--family normal` assertion lets a legacy snapshot quote,
+/// with a warning to re-take it.
+#[test]
+fn from_state_legacy_snapshot_quotes_with_explicit_assertion() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), None);
+    quote_from_state_cmd(tmp.path())
+        .args([
+            "--from-state",
+            snap.to_str().unwrap(),
+            "--family",
+            "normal",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stderr(contains("explicit --family normal assertion"))
+        .stdout(contains("\"family\": \"normal\""));
+}
+
+/// A family-stamped normal snapshot quotes cleanly with no warning.
+#[test]
+fn from_state_normal_snapshot_quotes_silently() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), Some("normal"));
+    let assert = quote_from_state_cmd(tmp.path())
+        .args(["--from-state", snap.to_str().unwrap(), "--output", "json"])
+        .assert()
+        .success()
+        .stdout(contains("\"family\": \"normal\""));
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("pre-dates"),
+        "family-stamped snapshot must not warn: {stderr}"
+    );
+}
+
+// ─── `trade loop` safety validation (issue #40) ─────────────────────────────
+
+/// Hermetic loop command — validation bails before any RPC.
+fn trade_loop_cmd(cfg_dir: &std::path::Path, extra: &[&str]) -> Command {
+    let mut cmd = deadeye();
+    cmd.env("DEADEYE_CONFIG", cfg_dir.join("config.toml"))
+        .env("DEADEYE_RPC_URL", "http://127.0.0.1:1/rpc")
+        .env("DEADEYE_INDEXER_URL", "http://127.0.0.1:1/idx")
+        .args([
+            "trade",
+            "loop",
+            "0xabc",
+            "--belief",
+            "42",
+            "--budget",
+            "100",
+            "--max-collateral",
+            "100",
+        ])
+        .args(extra);
+    cmd
+}
+
+/// The loop refuses to run unbounded: at least one of --max-trades /
+/// --max-runtime / --session-budget is required.
+#[test]
+fn trade_loop_requires_a_stop_bound() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    trade_loop_cmd(tmp.path(), &["--min-ev", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("stop bound"));
+}
+
+/// The loop refuses to run without --min-ev unless explicitly opted out.
+#[test]
+fn trade_loop_requires_min_ev_gate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    trade_loop_cmd(tmp.path(), &["--max-trades", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("--min-ev"));
+}
+
+/// A belief source is mandatory: --from-forecast or --belief.
+#[test]
+fn trade_loop_requires_a_belief_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = deadeye();
+    cmd.env("DEADEYE_CONFIG", tmp.path().join("config.toml"))
+        .env("DEADEYE_RPC_URL", "http://127.0.0.1:1/rpc")
+        .args([
+            "trade",
+            "loop",
+            "0xabc",
+            "--budget",
+            "100",
+            "--max-collateral",
+            "100",
+            "--min-ev",
+            "1",
+            "--max-trades",
+            "1",
+        ]);
+    cmd.assert().failure().stderr(contains("belief source"));
+}
+
+/// `forecast loop` fails fast when no snapshot was ever committed.
+#[test]
+fn forecast_loop_requires_a_committed_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = deadeye();
+    cmd.env("DEADEYE_CONFIG", tmp.path().join("config.toml"))
+        .env("DEADEYE_FORECAST_DIR", tmp.path().join("forecasts"))
+        .args([
+            "forecast",
+            "loop",
+            "0xabc",
+            "--budget",
+            "100",
+            "--max-collateral",
+            "100",
+            "--min-ev",
+            "1",
+            "--max-trades",
+            "1",
+        ]);
+    cmd.assert()
+        .failure()
+        .stderr(contains("no committed snapshot"));
+}

@@ -300,3 +300,231 @@ async fn deadeye_watch_emits_json_updates() {
 const _: fn() = || {
     let _ = Sq128::from_f64;
 };
+
+// ─── trade loop (issue #40) ─────────────────────────────────────────────
+
+/// Observe-only, gated, and execute runs of `deadeye trade loop` against
+/// devnet: gates evaluate, the journal records every tick (skips included),
+/// and `--execute` submits exactly one trade before `--max-trades 1` stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deadeye_trade_loop_devnet() {
+    if !integration_enabled() {
+        eprintln!("skip: set DEADEYE_RUN_INTEGRATION=1");
+        return;
+    }
+    let env = bootstrap_devnet(BootstrapConfig::default())
+        .await
+        .expect("bootstrap succeeds");
+    let admin_handle = env.account_handle(&env.admin);
+    upsert_normal_profile_for_test(admin_handle.clone(), env.factory, env.collateral, 1)
+        .await
+        .expect("upsert normal profile");
+    let (initial_dist, _placeholder) = build_initial_normal_inputs(42.0, 64.0, 1000.0);
+    let hint_rpc = JsonRpcClient::new(HttpTransport::new(env.url.clone()));
+    let initial_hints = fetch_normal_hints(&hint_rpc, env.normal_runtime, initial_dist)
+        .await
+        .expect("fetch hints");
+    let market = deploy_normal_market_with_event(
+        &admin_handle,
+        env.factory,
+        1,
+        starknet_core::types::Felt::from(7_u64),
+        starknet_core::types::Felt::ZERO,
+        initial_dist,
+        initial_hints,
+    )
+    .await
+    .expect("deploy normal market");
+    initialize_market(
+        &admin_handle,
+        market,
+        env.collateral,
+        10_000_000_000_000_000_000_000_u128,
+    )
+    .await
+    .expect("initialize market");
+    let trader = env.participants.first().expect("a participant");
+    let trader_handle = env.account_handle(trader);
+    approve(
+        trader_handle.clone(),
+        env.collateral,
+        market,
+        1_000_000_000_000_000_000_000_u128,
+    )
+    .await
+    .expect("approve");
+
+    let market_hex = format!("{market:#x}");
+    let chain_id_hex = format!("{:#x}", env.chain_id);
+    let trader_addr = format!("{:#x}", trader.address);
+    let trader_pk = format!("{:#x}", trader.private_key);
+    let runtime_hex = format!("{:#x}", env.normal_runtime);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let read_rows = |path: &std::path::Path| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("journal written")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid journal row"))
+            .collect()
+    };
+
+    // ── observe-only run: gates pass but nothing is submitted ──
+    let journal = tmp.path().join("observe.jsonl");
+    let output = Command::new(cli_binary())
+        .arg("--output")
+        .arg("json")
+        .arg("--rpc-url")
+        .arg(env.url.as_str())
+        .env("DEADEYE_CHAIN_ID", &chain_id_hex)
+        .env("DEADEYE_ADDRESS", &trader_addr)
+        .args([
+            "trade",
+            "loop",
+            &market_hex,
+            "--family",
+            "normal",
+            "--belief",
+            "43",
+            "--belief-sigma",
+            "8",
+            "--budget",
+            "50",
+            "--interval",
+            "1s",
+            "--max-ticks",
+            "1",
+            "--max-trades",
+            "1",
+            "--min-ev",
+            "0.000001",
+            "--max-collateral",
+            "100",
+            "--journal",
+            journal.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn deadeye trade loop (observe)");
+    eprintln!(
+        "trade loop (observe) stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "observe loop returned non-zero");
+    let rows = read_rows(&journal);
+    assert!(rows.len() >= 2, "tick + stop rows expected: {rows:?}");
+    assert_eq!(rows[0]["action"], "skip", "{rows:?}");
+    assert_eq!(rows[0]["reason"], "observe_only", "{rows:?}");
+    assert!(rows[0].get("tx_hash").is_none(), "{rows:?}");
+    assert!(
+        rows[0]["gates"].as_array().is_some_and(|g| !g.is_empty()),
+        "gates recorded: {rows:?}"
+    );
+    assert_eq!(rows.last().unwrap()["action"], "stop", "{rows:?}");
+
+    // ── EV gate: an absurd --min-ev skips with ev_below_threshold ──
+    let journal_gate = tmp.path().join("gate.jsonl");
+    let output = Command::new(cli_binary())
+        .arg("--output")
+        .arg("json")
+        .arg("--rpc-url")
+        .arg(env.url.as_str())
+        .env("DEADEYE_CHAIN_ID", &chain_id_hex)
+        .env("DEADEYE_ADDRESS", &trader_addr)
+        .args([
+            "trade",
+            "loop",
+            &market_hex,
+            "--family",
+            "normal",
+            "--belief",
+            "43",
+            "--belief-sigma",
+            "8",
+            "--budget",
+            "50",
+            "--interval",
+            "1s",
+            "--max-ticks",
+            "1",
+            "--max-trades",
+            "1",
+            "--min-ev",
+            "1000000000",
+            "--max-collateral",
+            "100",
+            "--journal",
+            journal_gate.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn deadeye trade loop (gate)");
+    assert!(output.status.success(), "gate loop returned non-zero");
+    let rows = read_rows(&journal_gate);
+    assert_eq!(rows[0]["action"], "skip", "{rows:?}");
+    assert_eq!(rows[0]["reason"], "ev_below_threshold", "{rows:?}");
+
+    // ── execute run: exactly one submitted trade, then max-trades stop ──
+    let journal_exec = tmp.path().join("execute.jsonl");
+    let output = Command::new(cli_binary())
+        .arg("--output")
+        .arg("json")
+        .arg("--rpc-url")
+        .arg(env.url.as_str())
+        .env("DEADEYE_CHAIN_ID", &chain_id_hex)
+        .env("DEADEYE_ADDRESS", &trader_addr)
+        .env("DEADEYE_PRIVATE_KEY", &trader_pk)
+        .env("DEADEYE_NORMAL_RUNTIME_ADDR", &runtime_hex)
+        .args([
+            "trade",
+            "loop",
+            &market_hex,
+            "--family",
+            "normal",
+            "--belief",
+            "43",
+            "--belief-sigma",
+            "8",
+            "--budget",
+            "50",
+            "--interval",
+            "1s",
+            "--max-ticks",
+            "3",
+            "--max-trades",
+            "1",
+            "--min-ev",
+            "0.000001",
+            "--max-collateral",
+            "100",
+            "--execute",
+            "--dry-run-first",
+            "--journal",
+            journal_exec.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn deadeye trade loop (execute)");
+    eprintln!(
+        "trade loop (execute) stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "execute loop returned non-zero");
+    let rows = read_rows(&journal_exec);
+    let submits: Vec<&serde_json::Value> =
+        rows.iter().filter(|r| r["action"] == "submit").collect();
+    assert_eq!(submits.len(), 1, "exactly one submitted trade: {rows:?}");
+    assert!(
+        submits[0]["tx_hash"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("0x")),
+        "tx hash recorded: {rows:?}"
+    );
+    assert!(
+        submits[0]["dry_run"]["accepted"].as_bool().unwrap_or(false),
+        "dry-run-first verdict recorded: {rows:?}"
+    );
+    assert_eq!(
+        rows.last().unwrap()["reason"],
+        "max_trades_reached",
+        "loop stops on max-trades: {rows:?}"
+    );
+}

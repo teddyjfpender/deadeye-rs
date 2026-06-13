@@ -315,6 +315,18 @@ pub(crate) enum TradeCmd {
     Quote(TradeQuoteArgs),
     /// Submit a trade after a fresh preflight.
     Execute(TradeExecuteArgs),
+    /// EV-gated belief arbitrage loop: each tick re-reads the market,
+    /// re-loads the belief, runs the optimizer, and only trades when every
+    /// EV / risk / budget gate passes. Observe-only unless `--execute`.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// deadeye forecast snapshot 0xMARKET --mean 4.05 --sd 0.10
+    /// deadeye trade loop 0xMARKET --from-forecast --interval 10m \
+    ///     --min-ev 10 --max-trades 6 --budget 250 --max-collateral 250 --execute
+    /// ```
+    Loop(TradeLoopArgs),
     /// Show / open / replay a trade journal.
     Journal(TradeJournalArgs),
 }
@@ -347,7 +359,8 @@ pub(crate) struct TradeQuoteArgs {
     pub(crate) max_cvar: Option<f64>,
     /// Quote from a saved state snapshot (zero RPC). Produce one with
     /// `deadeye markets snapshot <ADDRESS> --output json > state.json`.
-    /// Normal-family only.
+    /// Normal-family only; the snapshot's embedded `family` field is
+    /// enforced (issue #38).
     #[arg(long, value_name = "PATH")]
     pub(crate) from_state: Option<std::path::PathBuf>,
     /// Candidate mean μ.
@@ -445,6 +458,116 @@ pub(crate) struct TradeExecuteArgs {
     /// stationary check. Offline path only.
     #[arg(long, hide = true)]
     pub(crate) x_star: Option<f64>,
+}
+
+/// `deadeye trade loop` / `deadeye forecast loop` — the EV-gated belief
+/// arbitrage loop (issue #40). One tick = fresh market read → belief load →
+/// optimizer → gate evaluation → at most one (optionally dry-run-first)
+/// submission → a journal row (including no-trade ticks with the reason).
+#[derive(Debug, Clone, clap::Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "clap flag surface — each bool is an independent CLI switch"
+)]
+pub(crate) struct TradeLoopArgs {
+    /// Market contract address.
+    #[arg(value_name = "ADDRESS")]
+    pub(crate) market: String,
+    /// Force a specific family (otherwise auto-detected).
+    #[arg(long, value_name = "FAMILY")]
+    pub(crate) family: Option<FamilyArg>,
+    /// Re-load the committed forecast snapshot as the belief on EVERY tick —
+    /// re-committing the snapshot mid-loop takes effect live.
+    #[arg(long, conflicts_with = "belief")]
+    pub(crate) from_forecast: bool,
+    /// Explicit belief mean (log-space μ on lognormal markets). Pass this or
+    /// --from-forecast.
+    #[arg(long)]
+    pub(crate) belief: Option<f64>,
+    /// Belief sigma (defaults to the forecast snapshot's σ with
+    /// --from-forecast, else the live market sigma).
+    #[arg(long)]
+    pub(crate) belief_sigma: Option<f64>,
+    /// Optimizer budget per tick — the max collateral the optimizer may
+    /// target for a single trade (XP).
+    #[arg(long, value_name = "XP")]
+    pub(crate) budget: f64,
+    /// Risk preset (conservative=0.25, balanced=0.5, aggressive=1.0) — caps
+    /// the stake at the fractional-Kelly amount each tick.
+    #[arg(long, value_name = "PRESET")]
+    pub(crate) risk: Option<String>,
+    /// Bankroll (XP) for Kelly sizing — pairs with --kelly or --risk.
+    #[arg(long, value_name = "XP")]
+    pub(crate) bankroll: Option<f64>,
+    /// Kelly multiplier cap on the stake (e.g. 0.5 = half-Kelly); needs
+    /// --bankroll.
+    #[arg(long, value_name = "FRAC")]
+    pub(crate) kelly: Option<f64>,
+    /// Gate: skip the tick unless 5% CVaR loss stays within this many XP
+    /// (normal family only).
+    #[arg(long, value_name = "XP")]
+    pub(crate) max_cvar: Option<f64>,
+    /// Hard ceiling (XP) on the gross collateral any single trade supplies.
+    /// The chain-certified requirement is checked against it pre-submit.
+    #[arg(long, value_name = "XP")]
+    pub(crate) max_collateral: f64,
+    /// Tick interval (e.g. `30s`, `10m`, `1h`).
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "10m")]
+    pub(crate) interval: std::time::Duration,
+    /// Stop after this many SUBMITTED trades.
+    #[arg(long, value_name = "N")]
+    pub(crate) max_trades: Option<u32>,
+    /// Stop after this much wall-clock runtime (e.g. `6h`).
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub(crate) max_runtime: Option<std::time::Duration>,
+    /// Stop once this much cumulative gross collateral (XP) has been
+    /// supplied across the loop's submitted trades.
+    #[arg(long, value_name = "XP")]
+    pub(crate) session_budget: Option<f64>,
+    /// Per-UTC-day cap on cumulative gross collateral (XP).
+    #[arg(long, value_name = "XP")]
+    pub(crate) daily_budget: Option<f64>,
+    /// Minimum time between submitted trades (e.g. `20m`).
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub(crate) cooldown: Option<std::time::Duration>,
+    /// Gate: only trade when the optimizer expected value (XP) is at least
+    /// this. Required unless --allow-zero-ev-gate.
+    #[arg(long, value_name = "XP")]
+    pub(crate) min_ev: Option<f64>,
+    /// Gate: only trade when EV per locked XP clears this many basis points.
+    #[arg(long, value_name = "BPS")]
+    pub(crate) min_edge_bps: Option<f64>,
+    /// Sanity stop: end the loop when the optimizer candidate's mean sits
+    /// more than this many BELIEF sigmas from the belief mean — a sign of
+    /// stale or inconsistent input (e.g. wrong units / log-space mix-up).
+    #[arg(long, value_name = "SIGMAS")]
+    pub(crate) max_drift_from_belief: Option<f64>,
+    /// Refuse to trade when the forecast snapshot is older than this
+    /// (e.g. `12h`); the tick is journaled as `forecast_stale`.
+    #[arg(long, value_parser = humantime::parse_duration)]
+    pub(crate) stop_if_forecast_stale: Option<std::time::Duration>,
+    /// Simulate the multicall gas-free immediately before EVERY submission;
+    /// a failed simulation skips the tick instead of submitting.
+    #[arg(long)]
+    pub(crate) dry_run_first: bool,
+    /// Actually submit trades. WITHOUT this flag the loop is observe-only:
+    /// it evaluates every gate and journals what it would have done.
+    #[arg(long)]
+    pub(crate) execute: bool,
+    /// Run without a --min-ev gate (any positive-EV candidate may trade).
+    #[arg(long)]
+    pub(crate) allow_zero_ev_gate: bool,
+    /// Loop journal (JSONL, one row per tick incl. skips). Defaults to
+    /// `~/.local/share/deadeye/loops/<market>.jsonl`. Submitted trades are
+    /// ALSO appended to the canonical trade journal.
+    #[arg(long)]
+    pub(crate) journal: Option<std::path::PathBuf>,
+    /// Math runtime address (lognormal probe fallback; optional).
+    #[arg(long)]
+    pub(crate) runtime: Option<String>,
+    /// Test gate: stop after N ticks regardless of other bounds.
+    #[arg(long, hide = true)]
+    pub(crate) max_ticks: Option<u32>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -814,6 +937,11 @@ pub(crate) enum MarketsCmd {
         /// Market contract address.
         #[arg(value_name = "ADDRESS")]
         address: String,
+        /// Force a specific family (skip auto-detect). Only `normal` markets
+        /// can be snapshot today; the flag exists so detection failures have
+        /// an escape hatch.
+        #[arg(long, value_name = "FAMILY")]
+        family: Option<FamilyArg>,
     },
     /// List markets from the indexer.
     ///
@@ -832,7 +960,8 @@ pub(crate) enum MarketsCmd {
     },
     /// Read a single market's on-chain state.
     ///
-    /// Family is auto-detected by trying each family's `params()` read.
+    /// Family is auto-detected (indexer metadata → class hash → factory
+    /// registration); pass --family to skip detection.
     ///
     /// # Example
     ///
@@ -1175,6 +1304,18 @@ pub(crate) enum ForecastCmd {
     /// Execute a trade straight from the committed snapshot (the write sibling
     /// of `forecast quote`). Honors `--max-collateral` and the confirm prompt.
     Trade(ForecastTradeArgs),
+    /// Run the EV-gated arbitrage loop against the committed snapshot —
+    /// `trade loop --from-forecast` with the forecast pre-wired. The snapshot
+    /// is re-loaded every tick, so a fresh `forecast snapshot` commit takes
+    /// effect live.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// deadeye forecast loop 0xMARKET --interval 10m --min-ev 10 \
+    ///     --max-trades 6 --budget 250 --max-collateral 250 --execute
+    /// ```
+    Loop(TradeLoopArgs),
     /// Run a Bayesian / aggregation routine (JSON in, JSON + rationale out).
     Bayes(ForecastBayesArgs),
     /// Score the committed snapshot against the settled market: CRPS,

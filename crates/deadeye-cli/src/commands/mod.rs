@@ -32,6 +32,7 @@ pub(crate) mod render_helpers;
 pub(crate) mod risk;
 pub(crate) mod runtime_resolver;
 pub(crate) mod trade;
+pub(crate) mod trade_loop;
 pub(crate) mod update;
 pub(crate) mod watch;
 

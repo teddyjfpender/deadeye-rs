@@ -169,6 +169,13 @@ is rejected on-chain with `SIGMA_TOO_LOW`, so size your variance above the floor
 (`--runtime 0x...` still exists as an optional override to force the on-chain
 preflight path, but you never need it.)
 
+The market **family is auto-detected** (indexer metadata → class hash → factory
+registration) and the resolved family is printed in the quote output — on a
+lognormal market the quote runs lognormal math without you passing anything.
+If detection cannot conclude, the command errors and asks for an explicit
+`--family normal|lognormal|multinoulli|bivariate` instead of guessing. On
+lognormal markets, remember `--belief` is the **log-space** μ.
+
 ## 4. Execute
 
 ```bash
@@ -229,6 +236,52 @@ deadeye position show <MARKET_ADDR>   # your position on this market
 deadeye position list                 # all open positions
 deadeye trade journal --tail 20       # recent trade log
 ```
+
+## 5. Automate it: the EV-gated arbitrage loop
+
+`trade loop` turns the manual forecast → quote → dry-run → execute cycle into
+a bounded, auditable agent loop: each tick it re-reads the market, re-loads
+your belief, runs the same optimizer as `trade quote --belief --budget`, and
+only trades when every gate passes.
+
+```bash
+# Curate the belief once, then let the loop enforce it:
+deadeye forecast snapshot <MKT> --mean 4.05 --sd 0.10 --method nowcast
+deadeye forecast loop <MKT> --interval 10m --min-ev 10 --max-trades 6 \
+    --budget 250 --max-collateral 250 --session-budget 1000 --cooldown 20m \
+    --dry-run-first --execute
+
+# Or with an explicit belief (log-space μ on lognormal markets):
+deadeye trade loop <MKT> --belief 4.05 --belief-sigma 0.10 --interval 10m \
+    --min-ev 10 --max-trades 6 --budget 250 --max-collateral 250 --execute
+```
+
+Safety posture (all enforced, not advisory):
+
+- **Observe-only by default** — without `--execute` the loop evaluates every
+  gate and journals what it *would* have done. Run it observe-only first.
+- **Hard stop bounds required** — at least one of `--max-trades`,
+  `--max-runtime`, `--session-budget`. `--daily-budget` adds a per-UTC-day
+  cap; `--cooldown` spaces submissions.
+- **`--min-ev` required** unless you explicitly pass `--allow-zero-ev-gate`.
+  Other gates: `--min-edge-bps` (EV per locked XP), `--max-cvar` (normal
+  family), `--max-collateral` (chain-certified, pre-submit), market
+  active/not-paused/not-settled, wallet balance.
+- **`--from-forecast` re-reads the snapshot every tick** — re-committing
+  `forecast snapshot` mid-loop takes effect live; `--stop-if-forecast-stale
+  12h` refuses to trade on an old one. `--max-drift-from-belief <σ>` stops
+  the loop when the candidate sits implausibly far from your belief (wrong
+  units / log-space mix-up guard).
+- **No retries, no prompts** — a failed submission is journaled and the loop
+  waits for the next tick; one market snapshot per tick (RPC etiquette).
+
+Every tick appends one JSONL row to
+`~/.local/share/deadeye/loops/<market>.jsonl` (or `--journal`) — including
+skips, e.g. `{"action":"skip","reason":"ev_below_threshold",…}` with the full
+gate array, pre-state, belief, candidate, EV/edge/CVaR, and tx hash +
+post-state on submits. Submitted trades also land in the canonical
+`trade journal`. In `--output json` mode the same rows stream to stdout as
+NDJSON.
 
 ## Documentation
 

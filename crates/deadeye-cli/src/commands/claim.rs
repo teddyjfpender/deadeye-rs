@@ -26,7 +26,7 @@ pub(crate) async fn run(args: ClaimArgs, ctx: &AppContext) -> Result<()> {
     let client = deadeye_sdk::DeadeyeClient::new(provider);
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
 
     let account = build_owned_account(ctx)?;

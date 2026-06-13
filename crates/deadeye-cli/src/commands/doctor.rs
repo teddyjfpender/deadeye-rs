@@ -32,8 +32,7 @@ use crate::{
     commands::{
         account::{is_deployed, strk_balance},
         collateral::u256_to_human_18,
-        markets::detect_family,
-        runtime_resolver::build_provider,
+        runtime_resolver::{build_provider, detect_family},
     },
     context::AppContext,
     output::{Render, Renderer},
@@ -268,20 +267,44 @@ async fn market_checks(ctx: &AppContext, market: &str, checks: &mut Vec<DoctorCh
         )),
     }
 
-    // On-chain readability: detect the family via get_params. Proves the
-    // address is a Deadeye AMM and the chain read path works end-to-end.
+    // Two separate probes (issue #38 review): raw readability first —
+    // `get_params` is wire-identical across all four families, so one call
+    // proves the address is a Deadeye AMM even when the family cannot be
+    // classified (off-mainnet, no indexer, unknown class hash).
     match (build_provider(ctx).ok(), Felt::from_hex(market)) {
         (Some(_), Ok(market_felt)) => match ctx.deadeye_client() {
-            Ok(client) => match detect_family(&client, market_felt).await {
-                Ok(family) => checks.push(DoctorCheck::pass(
-                    "market readable on-chain",
-                    format!("family: {family:?} — math runs client-side, no runtime needed"),
-                )),
-                Err(e) => checks.push(DoctorCheck::fail(
-                    "market readable on-chain",
-                    format!("get_params probe failed: {e}"),
-                    "confirm the address is a Deadeye AMM contract on this chain",
-                )),
+            Ok(client) => {
+                match deadeye_sdk::starknet::NormalMarketReader::new(
+                    client.provider(),
+                    market_felt,
+                )
+                .params()
+                .await
+                {
+                    Ok(_) => checks.push(DoctorCheck::pass(
+                        "market readable on-chain",
+                        "get_params answered — the address is a Deadeye AMM".to_owned(),
+                    )),
+                    Err(e) => checks.push(DoctorCheck::fail(
+                        "market readable on-chain",
+                        format!("get_params probe failed: {e}"),
+                        "confirm the address is a Deadeye AMM contract on this chain",
+                    )),
+                }
+                // Family classification via the detection ladder (indexer
+                // metadata → class hash → factory registration).
+                match detect_family(ctx, &client, market_felt).await {
+                    Ok(family) => checks.push(DoctorCheck::pass(
+                        "market family detected",
+                        format!("family: {family:?} — math runs client-side, no runtime needed"),
+                    )),
+                    Err(e) => checks.push(DoctorCheck::fail(
+                        "market family detected",
+                        format!("{e:#}"),
+                        "pass --family explicitly, or make a detection source reachable \
+                         (indexer URL, DEADEYE_FACTORY_ADDR)",
+                    )),
+                }
             },
             Err(e) => checks.push(DoctorCheck::fail(
                 "market readable on-chain",

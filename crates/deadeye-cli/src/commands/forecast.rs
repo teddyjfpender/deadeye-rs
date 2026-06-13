@@ -33,6 +33,7 @@ pub(crate) async fn run(action: ForecastCmd, ctx: &AppContext, confirm: bool) ->
         ForecastCmd::Snapshot(args) => snapshot(args),
         ForecastCmd::Quote(args) => quote_from_snapshot(ctx, args).await,
         ForecastCmd::Trade(args) => trade_from_snapshot(ctx, args, confirm).await,
+        ForecastCmd::Loop(args) => loop_from_snapshot(ctx, args, confirm).await,
         ForecastCmd::Bayes(args) => bayes_routine(args),
         ForecastCmd::Score { market } => score(ctx, &market).await,
         ForecastCmd::Calibration => calibration(),
@@ -136,6 +137,25 @@ async fn trade_from_snapshot(
         x_star: None,
     };
     super::trade::execute(ctx, execute_args, confirm).await
+}
+
+/// `forecast loop` — the EV-gated arbitrage loop with the committed snapshot
+/// pre-wired as the (per-tick re-loaded) belief. Identical knobs to
+/// `trade loop`; only the belief source is forced.
+async fn loop_from_snapshot(
+    ctx: &AppContext,
+    mut args: crate::cli::TradeLoopArgs,
+    confirm: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        args.belief.is_none(),
+        "forecast loop reads the committed snapshot as the belief — drop --belief \
+         (use `trade loop --belief …` for an explicit one)"
+    );
+    // Fail fast when no snapshot exists rather than on the first tick.
+    let _ = load_snapshot_or_bail(&args.market)?;
+    args.from_forecast = true;
+    super::trade_loop::run(ctx, args, confirm).await
 }
 
 fn new(args: ForecastNewArgs) -> Result<()> {

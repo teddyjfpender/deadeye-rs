@@ -44,7 +44,7 @@ pub(crate) async fn run(args: WatchArgs, ctx: &AppContext) -> Result<()> {
     let client = DeadeyeClient::new(provider);
     let family = match args.family {
         Some(f) => f.as_sdk(),
-        None => super::markets::detect_family(&client, market).await?,
+        None => super::runtime_resolver::detect_family(ctx, &client, market).await?,
     };
     let label = family_label(family);
 
