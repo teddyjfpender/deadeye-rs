@@ -266,14 +266,30 @@ impl Portfolio {
     /// (`c = 1`); others are scaled relative to it. Markets with no
     /// open position are skipped.
     ///
-    /// This is a **heuristic** coupling estimate — for production use
-    /// the caller should pass coupling coefficients derived from a
-    /// proper model of the MM's shared risk budget (e.g. gradient
-    /// sensitivity to a common factor, or signed notional exposure to
-    /// the same underlying event). The reduction in
-    /// [`effective_exposure_f64_with_coupling`] is exact given an
-    /// accurate `c`; the heuristic here just makes it usable out of
-    /// the box for a uniformly-warehoused book.
+    /// ## ⚠ This is a position-size heuristic, not a risk-coupling estimate
+    ///
+    /// `heuristic_coupling_coefficients()` returns `c` proportional to
+    /// notional position size. **Notional size is not the same as risk
+    /// coupling.** Two markets can hold positions of similar size but
+    /// share almost no risk (e.g. a large BTC price market and a large
+    /// ETH price market — the BTC/ETH correlation is high but not 1,
+    /// and the dominant risk factor for each is its own spot price, not
+    /// "size of my position on the other one"). Conversely, two markets
+    /// with very different position sizes can be strongly coupled (e.g.
+    /// a small "World Cup Winner" market and a larger "World Cup
+    /// Finalist" market — the conditional probability of the second
+    /// depends on the first).
+    ///
+    /// For production risk accounting, supply your own coupling
+    /// coefficients derived from domain knowledge, empirical
+    /// correlations, or a dedicated risk model — not from this
+    /// heuristic. The reduction in
+    /// [`effective_exposure_f64_with_coupling`] is exact under the
+    /// [linear-coupling model] given an accurate `c`; this heuristic
+    /// just makes the API usable out of the box for a uniformly-
+    /// warehoused book where a position-size proxy is acceptable.
+    ///
+    /// [linear-coupling model]: deadeye_collateral::multi_market#assumptions--standard-model
     #[must_use]
     pub fn heuristic_coupling_coefficients(&self) -> Vec<f64> {
         let values: Vec<f64> = self

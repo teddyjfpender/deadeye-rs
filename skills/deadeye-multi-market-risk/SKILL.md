@@ -42,12 +42,16 @@ gap   = naive_sum · (||c||₂ − 1)
   `deadeye-collateral` API, `Δ = 1.0` (unit-agnostic) is correct when
   you only want the **inflation factor**; multiply through by the
   per-market value to get the effective exposure.
-- The reduction is **exact** under the standard Gaussian-mechanism
-  model (linear coupling of the per-market query functions,
-  independent noise, full-vector observation). See the formal proof in
-  Zenodo DOI [10.5281/zenodo.20434661](https://doi.org/10.5281/zenodo.20434661),
+- The reduction is **mathematically exact under** the standard
+  Gaussian-mechanism model (linear coupling of the per-market query
+  functions, independent noise, full-vector observation). See the
+  formal proof in Zenodo DOI
+  [10.5281/zenodo.20434661](https://doi.org/10.5281/zenodo.20434661),
   Theorem 1, and the complementary correlated-noise result (GCI Sign
-  Theorem) in DOI [10.5281/zenodo.20078486](https://doi.org/10.5281/zenodo.20078486).
+  Theorem) in DOI
+  [10.5281/zenodo.20078486](https://doi.org/10.5281/zenodo.20078486).
+  Outside those assumptions it is an approximation, not a bound (see
+  [Assumptions / Standard Model](#assumptions--standard-model) below).
 
 ## When to use this
 
@@ -144,6 +148,14 @@ Use this when:
   prices, factor model, or a Bayesian shrinkage prior).
 - The risk officer requires model-derived coupling, not a heuristic.
 
+In general, supply your own coupling coefficients **derived from
+domain knowledge, empirical correlations, or a dedicated risk model**
+— correlation matrix is only one of several legitimate sources. For
+conditional probability markets (e.g. "Team A wins" vs. "Team A
+reaches the final"), the coupling vector is fully determined by the
+logical relationship between outcomes and is not a free parameter
+fit from data.
+
 ## Pairing with the existing per-market risk loop
 
 `deadeye-cli` already provides per-market risk gating via
@@ -158,10 +170,10 @@ limits. The multi-market correction **layers on top**:
    exceeds the bankroll, **stop opening new positions** until
    settlement or a deliberate re-hedge.
 
-## Why the bound is tight (not just a heuristic)
+## Assumptions / Standard Model
 
-The reduction in DOI 10.5281/zenodo.20434661 is **exact** under the
-following three assumptions:
+The reduction in DOI 10.5281/zenodo.20434661 is **mathematically exact
+under** the following three assumptions:
 
 1. **Linear coupling of the per-market query functions** — the
    position in market `j` is `c_j` units of a common base. This is
@@ -177,7 +189,11 @@ Outside these three conditions, `||c||₂` is a **lower bound** on the
 inflation factor, and the warehouse is *more* exposed than the
 formula says. Apply a safety margin (`1.1×`–`1.5×` is common) when
 the coupling is suspected to be non-linear or the noise is suspected
-to be correlated.
+to be correlated. If Deadeye later introduces non-linear payoffs,
+conditional markets, hierarchical markets, or complex correlated
+distributions, callers must re-derive the inflation factor from
+domain knowledge — this skill is a **standard-model approximation**
+in that regime, not a bound.
 
 ## Failure modes and fallbacks
 
