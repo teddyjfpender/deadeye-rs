@@ -1,7 +1,7 @@
 [package]
 name = "deadeye-cli"
 description = "Market-maker-grade command-line interface for the Deadeye Rust SDK."
-version = "0.1.19"
+version = "0.1.20"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
