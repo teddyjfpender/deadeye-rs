@@ -66,6 +66,18 @@ where
         LognormalDistribution::from_raw(raw).map_err(ContractError::Core)
     }
 
+    /// Reads market status (initialised / paused / settled). Same view and
+    /// wire shape as the normal AMM's `get_market_status`.
+    #[instrument(skip(self), fields(market = %self.address))]
+    pub async fn market_status(&self) -> ContractResult<crate::normal_amm::MarketStatus> {
+        self.call_view::<crate::normal_amm::MarketStatus>(
+            "get_market_status",
+            amm::get_market_status(),
+            &[],
+        )
+        .await
+    }
+
     /// Reads market parameters.
     pub async fn params(&self) -> ContractResult<AmmParamsRaw> {
         self.call_view::<AmmParamsRaw>("get_params", amm::get_params(), &[])

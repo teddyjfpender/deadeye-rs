@@ -67,6 +67,8 @@ use deadeye_starknet::{
 use futures::future::join_all;
 use tracing::instrument;
 
+pub use deadeye_optimizer::LognormalOptimizationResult;
+
 use crate::{
     error::{SdkError, SdkResult},
     legs::{LegInfo, LegValuation, PositionLegs, PositionValuation, SettlementPoint, belief_grid},

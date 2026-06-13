@@ -246,6 +246,12 @@ impl From<Sq128RawWire> for Sq128Raw {
 /// and are NOT used in the math.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NormalMarketStateSnapshot {
+    /// Market family this snapshot was taken from (issue #38). Defaults to
+    /// [`Family::Normal`] when absent so snapshot files that pre-date the
+    /// field keep deserializing — only the normal path could legitimately
+    /// produce them.
+    #[serde(default = "family_default_normal")]
+    pub family: crate::bulk::Family,
     /// Market contract address (hex).
     pub market: String,
     /// Distribution mean, chain-exact.
@@ -268,6 +274,11 @@ pub struct NormalMarketStateSnapshot {
     pub effective_k: f64,
     /// Human mirror of the pool backing in XP (display only).
     pub pool_backing_xp: f64,
+}
+
+/// Serde default for [`NormalMarketStateSnapshot::family`].
+fn family_default_normal() -> crate::bulk::Family {
+    crate::bulk::Family::Normal
 }
 
 impl NormalMarketStateSnapshot {
@@ -969,6 +980,7 @@ where
         let initial_backing = Sq128::from_raw(params.backing);
         let effective_k = live_effective_k(base_k, pool_backing, initial_backing).to_f64();
         Ok(NormalMarketStateSnapshot {
+            family: crate::bulk::Family::Normal,
             market: format!("{:#x}", self.reader.address()),
             mean_raw: current.mean().to_raw().into(),
             variance_raw: current.variance().to_raw().into(),
@@ -1795,5 +1807,55 @@ mod tests {
             quote.x_star, quote.candidate.mean,
             "no-trade fallback must report x_star == cand_mean"
         );
+    }
+
+    // ─── Snapshot family stamping (issue #38) ───────────────────────────
+
+    fn make_snapshot() -> NormalMarketStateSnapshot {
+        let zero = Sq128RawWire::from(Sq128::ZERO.to_raw());
+        NormalMarketStateSnapshot {
+            family: crate::bulk::Family::Normal,
+            market: "0x1".to_owned(),
+            mean_raw: zero,
+            variance_raw: zero,
+            sigma_raw: zero,
+            base_k_raw: zero,
+            initial_backing_raw: zero,
+            pool_backing_raw: zero,
+            mean: 0.0,
+            sigma: 0.0,
+            effective_k: 0.0,
+            pool_backing_xp: 0.0,
+        }
+    }
+
+    #[test]
+    fn snapshot_serializes_family_normal() {
+        let json = serde_json::to_value(make_snapshot()).unwrap();
+        assert_eq!(
+            json.get("family").and_then(|v| v.as_str()),
+            Some("normal"),
+            "snapshot JSON must carry the family tag",
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_without_family_defaults_to_normal() {
+        // Files written before issue #38 lack the field; only the normal
+        // path could legitimately produce them.
+        let mut json = serde_json::to_value(make_snapshot()).unwrap();
+        json.as_object_mut().unwrap().remove("family");
+        let snap: NormalMarketStateSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(snap.family, crate::bulk::Family::Normal);
+    }
+
+    #[test]
+    fn snapshot_family_lognormal_round_trips() {
+        let mut json = serde_json::to_value(make_snapshot()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("family".into(), serde_json::json!("lognormal"));
+        let snap: NormalMarketStateSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(snap.family, crate::bulk::Family::Lognormal);
     }
 }

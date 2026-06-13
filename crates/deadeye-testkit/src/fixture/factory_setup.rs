@@ -20,7 +20,8 @@ pub enum FactorySetupError {
 }
 
 /// Market-family discriminants. Must match the on-chain Cairo `MarketKind`
-/// enum order: Normal=1, Lognormal=2, BivariateNormal=3, Multinoulli=4.
+/// values: Normal=1, Multinoulli=2, Lognormal=4, BivariateNormal=5 (see
+/// `discriminant()` below; 3 is unassigned, 6 is skew-normal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MarketKind {
     /// Normal-distribution AMM.
