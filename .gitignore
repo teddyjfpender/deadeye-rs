@@ -27,3 +27,7 @@ deadeye.toml.local
 
 # OS
 Thumbs.db
+
+# Internal / planning artifacts (not for PR)
+AUDIT_REPORT*.md
+PR_DRAFT*.md

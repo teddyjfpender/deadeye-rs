@@ -19,11 +19,13 @@ use thiserror::Error;
 pub mod bivariate;
 pub mod categorical;
 pub mod lognormal;
+pub mod multi_market;
 pub use bivariate::{BivariateOptions, BivariateVerifiedMinimum, bivariate_collateral};
 pub use categorical::{
     CategoricalVerifiedMinimum, categorical_collateral, categorical_l2_norm, categorical_lambda,
 };
 pub use lognormal::{LognormalOptions, LognormalVerifiedMinimum, lognormal_collateral};
+pub use multi_market::{effective_sensitivity, inflate_collateral};
 
 /// `√π`, used in the closed-form L2 norm of a Gaussian PDF.
 pub const SQRT_PI: f64 = 1.772_453_850_905_516_f64;

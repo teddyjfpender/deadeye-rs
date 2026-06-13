@@ -32,6 +32,20 @@ use crate::{
     client::DeadeyeClient,
 };
 
+/// Re-export the multi-market effective-sensitivity primitive from
+/// `deadeye-collateral` so the SDK can compute coupled-exposure risk
+/// without taking a direct dependency on the solver crate.
+///
+/// Background: when a market maker warehouses positions across k
+/// markets simultaneously, the joint risk budget is no longer the
+/// naive sum of per-market exposures. If the per-market positions are
+/// linearly coupled through the MM's shared capital (e.g. positions
+/// in markets j and j' both react to a common underlying factor), the
+/// effective risk parameter is inflated by the L2-norm of the
+/// coupling vector `c`. See Zenodo DOI 10.5281/zenodo.20434661
+/// (Theorem 1) for the formal reduction.
+pub use deadeye_collateral::{effective_sensitivity, inflate_collateral};
+
 /// A reference to a market identified by `(family, address)`.
 ///
 /// This mirrors the tuple shape consumed by [`BulkReader`] but is a
@@ -244,6 +258,76 @@ impl Portfolio {
         // project STRK to whole tokens for a dimensionally consistent sum.
         let strk_f = (self.total_strk_balance as f64) / 1e18_f64;
         pos_sum + lp_sum + strk_f
+    }
+
+    /// Coupling coefficient `c_j` for each market in `self.markets`,
+    /// based on the position's `current_value_f64` normalised to the
+    /// largest position. The first market in the list is the reference
+    /// (`c = 1`); others are scaled relative to it. Markets with no
+    /// open position are skipped.
+    ///
+    /// This is a **heuristic** coupling estimate — for production use
+    /// the caller should pass coupling coefficients derived from a
+    /// proper model of the MM's shared risk budget (e.g. gradient
+    /// sensitivity to a common factor, or signed notional exposure to
+    /// the same underlying event). The reduction in
+    /// [`effective_exposure_f64_with_coupling`] is exact given an
+    /// accurate `c`; the heuristic here just makes it usable out of
+    /// the box for a uniformly-warehoused book.
+    #[must_use]
+    pub fn heuristic_coupling_coefficients(&self) -> Vec<f64> {
+        let values: Vec<f64> = self
+            .markets
+            .iter()
+            .map(|m| {
+                self.positions
+                    .get(&m.address)
+                    .map_or(0.0_f64, |p| p.current_value_f64)
+                    .max(0.0)
+            })
+            .collect();
+        let max = values.iter().fold(0.0_f64, |a, b| a.max(*b));
+        if max <= 0.0 {
+            return vec![0.0; values.len()];
+        }
+        values.iter().map(|v| v / max).collect()
+    }
+
+    /// Effective risk-aware exposure across the warehouse, computed via
+    /// the multi-output Gaussian release reduction
+    /// ([`effective_sensitivity`]). The coupling vector `c` is supplied
+    /// by the caller — use [`Self::heuristic_coupling_coefficients`] for
+    /// a default or pass a model-derived vector for production.
+    ///
+    /// Returns `None` if `c` is not the same length as `self.markets`
+    /// or the underlying accountant rejects the inputs (NaN, non-finite
+    /// `delta`, empty book). The naive per-market sum is returned by
+    /// [`Self::total_exposure_f64`].
+    #[must_use]
+    pub fn effective_exposure_f64_with_coupling(
+        &self,
+        c: &[f64],
+    ) -> Option<f64> {
+        if c.len() != self.markets.len() {
+            return None;
+        }
+        let values: Vec<f64> = self
+            .markets
+            .iter()
+            .map(|m| {
+                self.positions
+                    .get(&m.address)
+                    .map_or(0.0_f64, |p| p.current_value_f64)
+                    .max(0.0)
+            })
+            .collect();
+        // Per-market sensitivity proxy: scaled position value.
+        // The caller should pass a calibrated `delta` in production;
+        // we use 1.0 so the inflation factor is unit-agnostic.
+        let delta = 1.0_f64;
+        let factor = effective_sensitivity(c, delta).ok()?;
+        let naive: f64 = values.iter().sum();
+        Some(naive * factor)
     }
 
     /// Realised LP cashflow since `since_block`, per market.
