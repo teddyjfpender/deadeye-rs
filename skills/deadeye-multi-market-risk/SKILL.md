@@ -86,20 +86,32 @@ markets are coupled through a shared "early-round exit" factor — both
 respond to a Brazil exit, for example — so `c = (1.0, 0.667)` (the
 second market's exposure is two-thirds of the first).
 
-**Naive exposure** (per-market sum, no coupling):
-```rust
-let portfolio: Portfolio = /* loaded */;
-let naive: f64 = portfolio.total_exposure_f64();
-```
+**Effective exposure** (with coupling). Two equivalent approaches
+with different scope — pick the one whose `naive` base matches the
+positions you actually want to inflate:
 
-**Effective exposure** (with coupling):
 ```rust
 use deadeye_sdk::portfolio::effective_sensitivity;
 
+// (A) Full exposure base — `total_exposure_f64()` includes positions,
+// LP positions, and STRK balance. Multiply by the factor manually:
 let c = vec![1.0_f64, 2.0 / 3.0];
 let factor = effective_sensitivity(&c, 1.0).unwrap();   // = ||c||₂ ≈ 1.202
-let effective = naive * factor;
+let effective_full = portfolio.total_exposure_f64() * factor;
+
+// (B) Position-only base — `effective_exposure_f64_with_coupling(&c)`
+// computes its own `naive` from per-market `current_value_f64` only
+// (no LP / STRK), then multiplies by ||c||₂ internally. Use this when
+// you only want to inflate the per-position exposure and exclude
+// liquidity-provider shares and STRK balance from the inflated figure.
+let c = vec![1.0_f64, 2.0 / 3.0];
+let effective_positions = portfolio.effective_exposure_f64_with_coupling(&c)
+    .expect("c.len() must match portfolio.markets.len()");
 ```
+
+Both approaches yield the same `||c||₂ ≈ 1.202` inflation factor at
+full coupling for k = 2; the difference is the **base** being
+inflated (full warehouse vs. positions only).
 
 The inflation factor is `√(1² + 0.667²) ≈ 1.202`, i.e. **+20% effective
 risk** vs. the naive sum. A 100 XP bankroll budget that "feels
