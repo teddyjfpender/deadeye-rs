@@ -66,8 +66,8 @@
 //!   re-verifies.
 //! * **Lognormal / Multinoulli / Bivariate families** — off-chain only at this
 //!   revision. The wiring template is identical to the normal family's; landing
-//!   it is mechanical and tracked in `docs/SDK_QA_REVIEW.md`. The off-chain
-//!   solver is still exercised so the convergence-rate assertion is meaningful.
+//!   it is mechanical. The off-chain solver is still exercised so the
+//!   convergence-rate assertion is meaningful.
 //!
 //! ## Gating
 //!

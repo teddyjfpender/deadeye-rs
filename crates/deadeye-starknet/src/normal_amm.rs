@@ -802,8 +802,8 @@ where
     ///   `expected_*` guards see byte-exact values);
     /// * fetches chain-correct sqrt hints for the current dist;
     /// * builds [`SellExecutionGuardsRaw`] using live LP backing (the AMM
-    ///   guards against `get_pool_backing()` — see `docs/DEVNET_SHAKEDOWN.md`
-    ///   for why `params.backing` is wrong);
+    ///   guards against `get_pool_backing()` (not `params.backing`, which is
+    ///   wrong here);
     /// * submits `sell_position_guarded(current_dist, x* = current.mean,
     ///   current_hints, guards)`.
     ///

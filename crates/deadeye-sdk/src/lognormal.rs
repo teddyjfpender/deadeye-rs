@@ -58,6 +58,7 @@ use deadeye_collateral::{LognormalOptions, LognormalVerifiedMinimum, lognormal_c
 use deadeye_core::{
     LognormalDistribution, Sq128, distribution::LognormalDistributionRaw, sq128::Sq128Raw,
 };
+pub use deadeye_optimizer::LognormalOptimizationResult;
 use deadeye_starknet::{
     Account, ExecutionReceipt, Felt, LognormalMarketReader, LognormalMarketWriter, Provider,
     types::lognormal::{
@@ -66,8 +67,6 @@ use deadeye_starknet::{
 };
 use futures::future::join_all;
 use tracing::instrument;
-
-pub use deadeye_optimizer::LognormalOptimizationResult;
 
 use crate::{
     error::{SdkError, SdkResult},

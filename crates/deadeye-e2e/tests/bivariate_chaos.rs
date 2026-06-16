@@ -478,8 +478,7 @@ const S2_RHO_NEAR_ONE: BivariateCandidate = BivariateCandidate {
 /// chain's policy envelope but still exercising the asymmetric corner).
 ///
 /// The "edge" version (σ₁/σ₂ = 4 AND stretch ≈ 4) trips the chain's
-/// scaled-tolerance check at `effective_k`-amplified λ — see the
-/// off-chain Newton tolerance discussion in `docs/DEVNET_SHAKEDOWN.md`.
+/// scaled-tolerance check at `effective_k`-amplified λ.
 /// A market-maker SDK could expose the edge-test explicitly as a
 /// "should-reject" probe; for the chaos throughput suite we keep the
 /// asymmetric pressure but stay inside the envelope so this trade is
@@ -862,8 +861,7 @@ async fn bivariate_market_chaos() {
             lp_account,
         );
         // 50 STRK keeps the request under the participant's ~1000 STRK
-        // predeployed balance (post-gas-burn). See
-        // docs/INITIALIZE_OVERFLOW_DIAGNOSIS.md for the underflow trace.
+        // predeployed balance (post-gas-burn).
         writer
             .add_liquidity(sq(50.0))
             .await

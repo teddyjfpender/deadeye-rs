@@ -27,9 +27,8 @@
 //!
 //! Same convention as the other chaos suites: `DEADEYE_RUN_INTEGRATION=1`
 //! must be set, the test is otherwise `#[ignore]`'d. When the
-//! `initialize_market` u256 overflow is fixed (see
-//! `docs/CHAOS_SUITE_STATUS.md`), the test goes live; until then it
-//! short-circuits with a `skip:` log so CI marks it as skipped instead
+//! `initialize_market` u256 overflow is fixed, the test goes live; until then
+//! it short-circuits with a `skip:` log so CI marks it as skipped instead
 //! of green-by-accident.
 
 use deadeye_sdk::{DeadeyeClient, Family, MarketRef, Portfolio, starknet::JsonRpcProvider};
@@ -79,7 +78,7 @@ async fn portfolio_aggregates_across_three_markets() {
     // ── Phase 1: deploy three markets across two families ─────────────
     //
     // The full deploy + initialize + trade sequence is blocked on the
-    // u256 overflow described in `docs/CHAOS_SUITE_STATUS.md`. Until
+    // u256 overflow on `initialize_market`. Until
     // that lifts we keep the wiring (helpers exist for both families)
     // but short-circuit before the live calls so this test runs in CI
     // as "ignored, no-op when unblocked" rather than "false-green".
@@ -87,7 +86,7 @@ async fn portfolio_aggregates_across_three_markets() {
     // The intent below is documented in detail so when the blocker
     // resolves the rest drops in without re-deriving structure.
     eprintln!("⚠️  initialize_market blocker active — short-circuiting before deploys.");
-    eprintln!("    Test scaffolding is wired; see docs/SDK_QA_WAVE2.md.");
+    eprintln!("    Test scaffolding is wired.");
     let _ = (&env, &client, &trader);
     // Sanity: even with the blocker, we can construct an empty Portfolio
     // and exercise the public API surface from the integration crate.

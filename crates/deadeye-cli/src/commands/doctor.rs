@@ -274,12 +274,9 @@ async fn market_checks(ctx: &AppContext, market: &str, checks: &mut Vec<DoctorCh
     match (build_provider(ctx).ok(), Felt::from_hex(market)) {
         (Some(_), Ok(market_felt)) => match ctx.deadeye_client() {
             Ok(client) => {
-                match deadeye_sdk::starknet::NormalMarketReader::new(
-                    client.provider(),
-                    market_felt,
-                )
-                .params()
-                .await
+                match deadeye_sdk::starknet::NormalMarketReader::new(client.provider(), market_felt)
+                    .params()
+                    .await
                 {
                     Ok(_) => checks.push(DoctorCheck::pass(
                         "market readable on-chain",

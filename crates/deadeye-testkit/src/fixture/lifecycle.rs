@@ -52,7 +52,7 @@ use crate::fixture::{
 /// predeployed STRK each account starts with only **1000 STRK**, and the
 /// bootstrap burns roughly 30 STRK in declare/deploy gas — keep the
 /// per-profile `backing` at or below ~500 STRK for the predeployed admin
-/// account. See `docs/INITIALIZE_OVERFLOW_DIAGNOSIS.md`.
+/// account.
 pub async fn initialize_market<A>(
     account: &A,
     market: Felt,
@@ -119,8 +119,7 @@ fn sq(v: f64) -> Sq128Raw {
 /// `1000 × 10^18` base units in `transferFrom(admin, market, …)` against
 /// an admin balance of ~970 STRK — that subtraction underflows inside
 /// OZ ERC20 (`balance - amount`) and surfaces as a confusing
-/// `u256_sub Overflow` revert on `initialize()`. See
-/// `docs/INITIALIZE_OVERFLOW_DIAGNOSIS.md` for the full trace.
+/// `u256_sub Overflow` revert on `initialize()`.
 pub async fn upsert_normal_profile_for_test<A>(
     account: A,
     factory: Felt,

@@ -319,10 +319,7 @@ fn deploy_math_runtime_confirm_without_key_errors_before_deploy() {
 
 /// Build a structurally valid `markets snapshot` JSON fixture. `family` is
 /// injected verbatim when given; `None` produces a legacy (pre-#38) file.
-fn write_snapshot_fixture(
-    dir: &std::path::Path,
-    family: Option<&str>,
-) -> std::path::PathBuf {
+fn write_snapshot_fixture(dir: &std::path::Path, family: Option<&str>) -> std::path::PathBuf {
     use deadeye_core::Sq128;
     let raw = |v: f64| {
         let r = Sq128::from_f64(v).expect("fixture value converts").to_raw();
@@ -361,7 +358,15 @@ fn quote_from_state_cmd(cfg_dir: &std::path::Path) -> Command {
     cmd.env("DEADEYE_CONFIG", cfg_dir.join("config.toml"))
         .env("DEADEYE_RPC_URL", "http://127.0.0.1:1/rpc")
         .env("DEADEYE_INDEXER_URL", "http://127.0.0.1:1/idx")
-        .args(["trade", "quote", "0xabc", "--mean", "43", "--variance", "64"]);
+        .args([
+            "trade",
+            "quote",
+            "0xabc",
+            "--mean",
+            "43",
+            "--variance",
+            "64",
+        ]);
     cmd
 }
 
@@ -385,7 +390,12 @@ fn from_state_refuses_contradicting_family_flag() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let snap = write_snapshot_fixture(tmp.path(), Some("normal"));
     quote_from_state_cmd(tmp.path())
-        .args(["--from-state", snap.to_str().unwrap(), "--family", "lognormal"])
+        .args([
+            "--from-state",
+            snap.to_str().unwrap(),
+            "--family",
+            "lognormal",
+        ])
         .assert()
         .failure()
         .stderr(contains("contradicts"));

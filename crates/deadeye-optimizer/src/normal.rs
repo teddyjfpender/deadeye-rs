@@ -461,9 +461,8 @@ mod tests {
 
     // ─── λ-scaled chain-frame regressions (v0.1.3) ───────────────────────
     //
-    // These pin the two bugs Reviewer B's audit named
-    // (`docs/REVIEW_ITEM3_DRIVER_B.md` §6) so they cannot silently
-    // re-enter. Cheap unit tests that target the inner cost frame
+    // These pin the two bugs Reviewer B's audit named so they cannot
+    // silently re-enter. Cheap unit tests that target the inner cost frame
     // directly.
 
     /// **Bug A — budget filter must use λ-scaled cost.**

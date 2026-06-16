@@ -556,7 +556,7 @@ fn payout_at_lognormal_or_zero(dist: &LognormalDistribution, k: f64, x_star: f64
 /// collateral budget.
 #[must_use]
 pub const fn spread_at_normal_skipped() -> &'static str {
-    "spread_at is not exposed: see module-level docs on `pricing` and docs/SDK_STRATEGY_WAVE2.md"
+    "spread_at is not exposed: see the module-level docs on `pricing`"
 }
 
 #[cfg(test)]

@@ -27,8 +27,7 @@
 //! Both the SUT and the ground truth therefore "agreed" on the wrong
 //! answer — `net = λ_g·GPI_g − λ_f·GPI_f − (−d_min)` — and the
 //! 5 000-case proptest passed trivially while two real bugs in
-//! `optimize_normal_trade` went unnoticed (Reviewer B's audit,
-//! `docs/REVIEW_ITEM3_DRIVER_B.md` §6).
+//! `optimize_normal_trade` went unnoticed (Reviewer B's audit).
 //!
 //! This file's ground truth now mirrors the **chain** semantics that
 //! `optimize_quote_offline` already enforces

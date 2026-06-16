@@ -247,9 +247,9 @@ impl From<Sq128RawWire> for Sq128Raw {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NormalMarketStateSnapshot {
     /// Market family this snapshot was taken from (issue #38). Defaults to
-    /// [`crate::bulk::Family::Normal`] when absent so snapshot files that pre-date the
-    /// field keep deserializing — only the normal path could legitimately
-    /// produce them.
+    /// [`crate::bulk::Family::Normal`] when absent so snapshot files that
+    /// pre-date the field keep deserializing — only the normal path could
+    /// legitimately produce them.
     #[serde(default = "family_default_normal")]
     pub family: crate::bulk::Family,
     /// Market contract address (hex).

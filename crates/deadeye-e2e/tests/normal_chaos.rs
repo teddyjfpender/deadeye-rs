@@ -33,7 +33,7 @@
 //! End-to-end multi-participant chaos suite for the **normal (Gaussian)
 //! AMM**. Merged from `normal_chaos_driver1.rs` (canonical base) and
 //! `normal_chaos_driver2.rs` (Scenario/Action queue scaffolding) per
-//! reviewer feedback in `docs/CHAOS_DRIVER_BRIEF.md`.
+//! reviewer feedback.
 //!
 //! ## Question
 //! "Anthropic Opus 4.7 ARC-AGI-3 score (%) on 2026-12-31."
@@ -377,8 +377,7 @@ const TRADE_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000_u128; // 1000 STRK
 /// NOTE: `approve` does NOT check balance, so this can exceed the
 /// admin's STRK balance harmlessly. The real check happens inside
 /// `transferFrom` during `initialize()`, where the AMM pulls exactly
-/// `backing × 10^token_decimals` base units. See
-/// `docs/INITIALIZE_OVERFLOW_DIAGNOSIS.md`.
+/// `backing × 10^token_decimals` base units.
 const INIT_APPROVE_AMOUNT: u128 = 10_000_000_000_000_000_000_000_u128; // 10k STRK
 
 /// Settlement value x* (a believable ARC-AGI-3 outcome, %).

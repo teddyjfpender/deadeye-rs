@@ -3,12 +3,12 @@
 //! * Felt parsing with friendly error messages.
 //! * Math-runtime address resolution (CLI flag → family-specific env var).
 //! * Market family auto-detect (issue #38) via a layered ladder: explicit
-//!   `--family` flag → indexer `marketType` metadata → the market's class
-//!   hash compared against the pinned deployment manifest → the factory's
+//!   `--family` flag → indexer `marketType` metadata → the market's class hash
+//!   compared against the pinned deployment manifest → the factory's
 //!   `market_type_for_market` registration. Never guesses: when every rung
-//!   fails the caller gets an error asking for `--family`, because normal
-//!   and lognormal AMMs are wire-identical on every shared view and a wrong
-//!   guess silently produces wrong math.
+//!   fails the caller gets an error asking for `--family`, because normal and
+//!   lognormal AMMs are wire-identical on every shared view and a wrong guess
+//!   silently produces wrong math.
 //! * Owned-account construction from the resolved config + private-key env var.
 //!
 //! All resolution failures are surfaced as `anyhow::Error` with a hint
@@ -19,9 +19,7 @@ use deadeye_deployer::{ClassHashes, Deployment};
 use deadeye_sdk::{DeadeyeClient, bulk::Family};
 use deadeye_starknet::{FactoryReader, JsonRpcProvider, OwnedAccount};
 use starknet_core::types::{BlockId, BlockTag, Felt, StarknetError};
-use starknet_providers::{
-    JsonRpcClient, Provider as _, ProviderError, jsonrpc::HttpTransport,
-};
+use starknet_providers::{JsonRpcClient, Provider as _, ProviderError, jsonrpc::HttpTransport};
 use url::Url;
 
 use crate::{cli::FamilyArg, context::AppContext};
@@ -148,8 +146,8 @@ enum ClassHashProbe {
     Unavailable(String),
 }
 
-/// Read the market's class hash via a raw JSON-RPC client (the [`deadeye_starknet::Provider`]
-/// trait only exposes `call`).
+/// Read the market's class hash via a raw JSON-RPC client (the
+/// [`deadeye_starknet::Provider`] trait only exposes `call`).
 async fn market_class_hash(ctx: &AppContext, market: Felt) -> ClassHashProbe {
     let url = match Url::parse(&ctx.config.rpc_url) {
         Ok(u) => u,
@@ -163,7 +161,7 @@ async fn market_class_hash(ctx: &AppContext, market: Felt) -> ClassHashProbe {
         Ok(hash) => ClassHashProbe::Found(hash),
         Err(ProviderError::StarknetError(StarknetError::ContractNotFound)) => {
             ClassHashProbe::NotDeployed
-        }
+        },
         Err(e) => ClassHashProbe::Unavailable(format!("get_class_hash_at: {e}")),
     }
 }
@@ -208,8 +206,8 @@ where
 {
     let mut attempts: Vec<String> = Vec::new();
 
-    // 1. Indexer metadata — authoritative for every registered market and
-    //    zero RPC against rate-limited public nodes.
+    // 1. Indexer metadata — authoritative for every registered market and zero RPC
+    //    against rate-limited public nodes.
     match ctx.indexer_client() {
         Ok(indexer) => match indexer.market(&format!("{market:#x}")).await {
             Ok(summary) => match family_from_slug(&summary.market_type) {
@@ -241,7 +239,7 @@ where
                     m.contracts_version
                 ));
             }
-        }
+        },
         ClassHashProbe::NotDeployed => {
             // Don't conclude from one un-retried replica: load-balanced RPC
             // pools can answer ContractNotFound for a just-deployed market
@@ -252,7 +250,7 @@ where
                  lagging RPC replica for a fresh deployment)"
                     .to_owned(),
             );
-        }
+        },
         ClassHashProbe::Unavailable(e) => attempts.push(e.clone()),
     }
 
@@ -279,14 +277,14 @@ where
                 attempts.push(format!(
                     "factory market-type discriminant {t} is unknown to this CLI"
                 ));
-            }
+            },
             Err(e) => attempts.push(format!("factory market-type lookup: {e}")),
         }
     } else {
         attempts.push(
             "no factory address available (set DEADEYE_FACTORY_ADDR; on mainnet the bundled \
              manifest provides it)"
-            .to_owned(),
+                .to_owned(),
         );
     }
 
@@ -404,14 +402,8 @@ mod tests {
             family_from_factory_discriminant(2),
             Some(Family::Multinoulli)
         );
-        assert_eq!(
-            family_from_factory_discriminant(4),
-            Some(Family::Lognormal)
-        );
-        assert_eq!(
-            family_from_factory_discriminant(5),
-            Some(Family::Bivariate)
-        );
+        assert_eq!(family_from_factory_discriminant(4), Some(Family::Lognormal));
+        assert_eq!(family_from_factory_discriminant(5), Some(Family::Bivariate));
         for unknown in [0u8, 3, 6, 255] {
             assert_eq!(family_from_factory_discriminant(unknown), None);
         }

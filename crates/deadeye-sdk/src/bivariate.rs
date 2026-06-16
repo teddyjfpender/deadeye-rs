@@ -2,8 +2,7 @@
 //!
 //! Two correlated Gaussians (μ₁, μ₂, σ₁², σ₂², ρ). The constructor's
 //! hint check requires byte-exact Sq128 derivations of σ₁, σ₂,
-//! `1/(1−ρ²)`, and the joint normalization — see
-//! `docs/DEVNET_SHAKEDOWN.md` for the gotcha. The writer's
+//! `1/(1−ρ²)`, and the joint normalization. The writer's
 //! `quote_trade` runs `expand_distribution_core_view` first so f64
 //! inputs are safely promoted to chain-exact full distributions.
 //!

@@ -5,8 +5,6 @@
 //! script-friendly in a pipe — every command supports
 //! `--output {pretty,plain,json}` and auto-detects when stdout is not a
 //! terminal.
-//!
-//! See `docs/CLI_WAVE_A.md` for the full command tour.
 
 #![doc(html_no_source)]
 // A CLI binary legitimately writes to stdout/stderr, and `pub(crate)`

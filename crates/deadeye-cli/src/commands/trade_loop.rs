@@ -10,10 +10,10 @@
 //! * observe-only unless `--execute` (everything still evaluated + journaled);
 //! * at least one of `--max-trades` / `--max-runtime` / `--session-budget`;
 //! * `--min-ev` required unless `--allow-zero-ev-gate`;
-//! * never prompts (a loop must not block on stdin) and never retries a
-//!   failed submission — errors are journaled and the loop waits for the
-//!   next tick (RPC etiquette: one snapshot per tick, quotes computed
-//!   locally, no tight retry wrapping).
+//! * never prompts (a loop must not block on stdin) and never retries a failed
+//!   submission — errors are journaled and the loop waits for the next tick
+//!   (RPC etiquette: one snapshot per tick, quotes computed locally, no tight
+//!   retry wrapping).
 
 use std::{
     io::Write as _,
@@ -287,8 +287,8 @@ impl LoopJournal {
 
 /// Default loop journal path: `~/.local/share/deadeye/loops/<market>.jsonl`.
 fn default_loop_journal_path(market: &str) -> Result<PathBuf> {
-    let mut dir = dirs::data_dir()
-        .context("could not locate user data dir; pass --journal explicitly")?;
+    let mut dir =
+        dirs::data_dir().context("could not locate user data dir; pass --journal explicitly")?;
     dir.push("deadeye");
     dir.push("loops");
     let key = market.trim().to_ascii_lowercase();
@@ -400,7 +400,10 @@ struct GateInputs {
 
 /// Evaluate every configured numeric gate. Returns all verdicts plus the
 /// first failing gate's name (the skip reason). Pure — unit-tested directly.
-fn evaluate_gates(args: &TradeLoopArgs, inputs: &GateInputs) -> (Vec<GateResult>, Option<&'static str>) {
+fn evaluate_gates(
+    args: &TradeLoopArgs,
+    inputs: &GateInputs,
+) -> (Vec<GateResult>, Option<&'static str>) {
     let mut gates = Vec::new();
     let mut push = |name: &'static str, pass: bool, threshold: Option<f64>, actual: Option<f64>| {
         gates.push(GateResult {
@@ -444,9 +447,9 @@ fn evaluate_gates(args: &TradeLoopArgs, inputs: &GateInputs) -> (Vec<GateResult>
         );
     }
     if let Some(cooldown) = args.cooldown {
-        let pass = inputs.last_trade_unix.is_none_or(|last| {
-            inputs.now_unix.saturating_sub(last) >= cooldown.as_secs()
-        });
+        let pass = inputs
+            .last_trade_unix
+            .is_none_or(|last| inputs.now_unix.saturating_sub(last) >= cooldown.as_secs());
         push(
             "cooldown_active",
             pass,
@@ -457,7 +460,9 @@ fn evaluate_gates(args: &TradeLoopArgs, inputs: &GateInputs) -> (Vec<GateResult>
         );
     }
     if let Some(session_budget) = args.session_budget {
-        let projected = inputs.required.mul_add(COLLATERAL_BUFFER, inputs.session_spend_xp);
+        let projected = inputs
+            .required
+            .mul_add(COLLATERAL_BUFFER, inputs.session_spend_xp);
         push(
             "session_budget_exhausted",
             projected <= session_budget,
@@ -466,7 +471,9 @@ fn evaluate_gates(args: &TradeLoopArgs, inputs: &GateInputs) -> (Vec<GateResult>
         );
     }
     if let Some(daily_budget) = args.daily_budget {
-        let projected = inputs.required.mul_add(COLLATERAL_BUFFER, inputs.day_spend_xp);
+        let projected = inputs
+            .required
+            .mul_add(COLLATERAL_BUFFER, inputs.day_spend_xp);
         push(
             "daily_budget_exhausted",
             projected <= daily_budget,
@@ -525,7 +532,9 @@ pub(crate) async fn run(ctx: &AppContext, args: TradeLoopArgs, _confirm: bool) -
         BeliefSource::Forecast(Workspace::resolve(&args.market)?)
     } else {
         BeliefSource::Explicit {
-            mu: args.belief.context("--belief or --from-forecast required")?,
+            mu: args
+                .belief
+                .context("--belief or --from-forecast required")?,
             sigma: args.belief_sigma,
         }
     };
@@ -731,18 +740,14 @@ async fn run_tick(
 ) -> Result<()> {
     // 1. Market status gate — paused/settled markets skip before any math.
     let status: MarketStatus = match family {
-        Family::Normal => {
-            NormalMarketReader::new(client.provider(), market)
-                .market_status()
-                .await
-                .map_err(|e| anyhow::anyhow!("get_market_status: {e}"))?
-        },
-        _ => {
-            LognormalMarketReader::new(client.provider(), market)
-                .market_status()
-                .await
-                .map_err(|e| anyhow::anyhow!("get_market_status: {e}"))?
-        },
+        Family::Normal => NormalMarketReader::new(client.provider(), market)
+            .market_status()
+            .await
+            .map_err(|e| anyhow::anyhow!("get_market_status: {e}"))?,
+        _ => LognormalMarketReader::new(client.provider(), market)
+            .market_status()
+            .await
+            .map_err(|e| anyhow::anyhow!("get_market_status: {e}"))?,
     };
     if !status.is_initialised {
         record.reason = Some("market_not_initialised".to_owned());
@@ -757,8 +762,8 @@ async fn run_tick(
         return Ok(());
     }
 
-    // 2. Belief — the forecast snapshot is re-read EVERY tick so a fresh
-    //    `forecast snapshot` commit takes effect live.
+    // 2. Belief — the forecast snapshot is re-read EVERY tick so a fresh `forecast
+    //    snapshot` commit takes effect live.
     let now = now_unix();
     let (belief_mu, belief_sigma_opt, belief_meta) = match belief_source {
         BeliefSource::Forecast(ws) => {
@@ -796,8 +801,16 @@ async fn run_tick(
     // 3. Snapshot + optimize (family-specific), populating the record.
     let solved = match family {
         Family::Normal => {
-            solve_tick_normal(client, market, args, belief_mu, belief_sigma_opt, belief_meta, record)
-                .await?
+            solve_tick_normal(
+                client,
+                market,
+                args,
+                belief_mu,
+                belief_sigma_opt,
+                belief_meta,
+                record,
+            )
+            .await?
         },
         _ => {
             solve_tick_lognormal(
@@ -821,8 +834,8 @@ async fn run_tick(
         return Ok(());
     };
 
-    // 4. Drift sanity stop — the candidate sits implausibly far from the
-    //    belief (σ-normalized), indicating stale or inconsistent input.
+    // 4. Drift sanity stop — the candidate sits implausibly far from the belief
+    //    (σ-normalized), indicating stale or inconsistent input.
     if let (Some(max_drift), Some(belief)) = (args.max_drift_from_belief, record.belief.clone()) {
         let drift = (tick_quote.candidate_mu - belief.mu).abs() / belief.sigma.max(f64::EPSILON);
         if drift > max_drift {
@@ -865,15 +878,14 @@ async fn run_tick(
     // 6. Observe-only: every gate passed — journal what would have happened.
     if !args.execute {
         record.reason = Some("observe_only".to_owned());
-        record.note =
-            Some("all gates passed — pass --execute to let the loop submit".to_owned());
+        record.note = Some("all gates passed — pass --execute to let the loop submit".to_owned());
         return Ok(());
     }
 
     // 7. Pre-submit freshness guard: the gates were evaluated against the
-    //    tick-start snapshot, and a dry-run + chain probe can take many
-    //    seconds — re-read the distribution and skip if the market moved
-    //    materially (the EV that passed the gates no longer holds).
+    //    tick-start snapshot, and a dry-run + chain probe can take many seconds —
+    //    re-read the distribution and skip if the market moved materially (the EV
+    //    that passed the gates no longer holds).
     if let (Some(fresh), Some(pre)) = (
         read_post_state(client, market, family).await,
         record.pre.clone(),
@@ -890,11 +902,10 @@ async fn run_tick(
         }
     }
 
-    // 8. Submit (at most once per tick), optionally dry-run-first. The
-    //    pipeline ceiling is the AUTHORITATIVE budget enforcement: cap it at
-    //    the remaining session/daily allowance so the chain-certified gross
-    //    (which can exceed the off-chain estimate the gates used) can never
-    //    overshoot an operator budget.
+    // 8. Submit (at most once per tick), optionally dry-run-first. The pipeline
+    //    ceiling is the AUTHORITATIVE budget enforcement: cap it at the remaining
+    //    session/daily allowance so the chain-certified gross (which can exceed the
+    //    off-chain estimate the gates used) can never overshoot an operator budget.
     let mut effective_ceiling = args.max_collateral;
     if let Some(session_budget) = args.session_budget {
         effective_ceiling = effective_ceiling.min(session_budget - state.session_spend_xp);
@@ -1408,7 +1419,10 @@ mod tests {
         };
         let (gates, failure) = evaluate_gates(&args, &inputs);
         assert_eq!(failure, Some("ev_below_threshold"));
-        let g = gates.iter().find(|g| g.name == "ev_below_threshold").unwrap();
+        let g = gates
+            .iter()
+            .find(|g| g.name == "ev_below_threshold")
+            .unwrap();
         assert_eq!(g.threshold, Some(10.0));
         assert_eq!(g.actual, Some(4.2));
     }
