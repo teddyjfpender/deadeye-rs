@@ -10,8 +10,11 @@ A Rust SDK for the Deadeye prediction-market protocol on Starknet, built for
 | `deadeye-core`       | Signed Q128.128 fixed-point, distribution types, error hierarchy. `no_std`-friendly. |
 | `deadeye-artifacts`  | Compile-time-embedded contract ABIs and release manifest.                       |
 | `deadeye-collateral` | Off-chain collateral solver (L2 norm, lambda, Newton-Raphson minimiser).        |
+| `deadeye-optimizer`  | EV-maximizing trade picker and LP P&L math for normal markets.                  |
 | `deadeye-starknet`   | Calldata encoders, entry-point selectors, view-call wrappers over `starknet-rs`.|
 | `deadeye-sdk`        | High-level façade: client, quote, per-market handles.                           |
+| `deadeye-deployer`   | Typed deployment manifests (+ future declare/deploy helpers).                   |
+| `deadeye-cli`        | `deadeye` — market-maker-grade CLI over the SDK (read, quote, trade, LP, loops).|
 | `deadeye-indexer`    | Typed HTTP client for the production indexer (`178-105-210-177.sslip.io`).       |
 | `deadeye-testkit`    | Integration-test helpers (devnet, hosted public RPC, harness). Unpublished.      |
 | `deadeye-e2e`        | End-to-end tests against a live RPC. Unpublished.                               |
@@ -71,6 +74,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## CLI quick start
+
+The `deadeye-cli` crate ships the `deadeye` binary — the same SDK surface as a
+market-maker-grade command line. Output auto-detects: a TTY renders tabular
+output, a pipe renders `key: value` lines, `--output json` is machine-readable.
+
+```bash
+# Wallet onboarding (one-time): import or derive a signer, claim the XP grant.
+deadeye account import          # or: deadeye account derive (HD fleet, deadeye/hd/v1)
+deadeye collateral claim-grant --execute
+deadeye doctor                  # readiness preflight (wallet, RPC, indexer)
+
+# Read path — family is auto-detected; nothing here costs collateral:
+deadeye markets list --limit 5
+deadeye markets show 0xMARKET
+deadeye markets snapshot 0xMARKET --output json > state.json   # fetch state once
+deadeye trade quote 0xMARKET --from-state state.json --belief 4.18 --budget 100
+
+# Automation — the EV-gated loop. Observe-only until you pass --execute:
+deadeye forecast snapshot 0xMARKET --mean 4.05 --sd 0.10
+deadeye trade loop 0xMARKET --from-forecast --interval 10m \
+    --min-ev 10 --max-trades 6 --budget 250 --max-collateral 250
+# add --execute to actually submit; `forecast loop` is the same with the
+# committed forecast pre-wired as the belief.
+```
+
+**Family auto-detection.** Normal and lognormal AMMs are wire-identical on
+every shared view call, so the CLI never probes a reader to guess the family —
+it resolves it semantically (indexer `marketType` → class hash → factory
+registration) and errors asking for `--family` when inconclusive. Pass
+`--family normal|lognormal` to force it.
+
+**Offline by default.** On mainnet the normal AMM uses library dispatch with no
+separate math-runtime contract, so quotes take the offline preflight path
+(σ + hints bit-exact with the chain; see below). `markets snapshot` +
+`trade quote --from-state` then explore unlimited candidates at zero RPC cost.
 
 ## Normal-market: chain vs. offline preflight
 

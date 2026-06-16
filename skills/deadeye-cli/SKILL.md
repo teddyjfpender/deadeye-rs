@@ -220,6 +220,10 @@ spent**:
    would-revert trade is rejected with the raw on-chain reason and **zero gas
    spent**.
 
+The same approve-bundling applies to liquidity provisioning: `deadeye lp add` /
+`lp remove` fold the collateral ERC-20 `approve` into the LP multicall, so you
+never hit the zero-allowance revert and never run a manual `approve` step.
+
 Add `--dry-run` to stop after step 3 and print the verdict (estimated fee on
 success, exact revert reason on failure) **without submitting anything** — no
 gas, no signature needed:
@@ -354,6 +358,11 @@ deadeye trade execute <MARKET> --belief 4.18 --budget 100             # one subm
 
 - **Fetch once, compute locally.** Don't re-run plain `quote` in a loop while
   you think — snapshot once and iterate with `--from-state`.
+- **Snapshots are family-stamped (issue #38).** A snapshot records the market
+  family it was taken from, and `trade quote --from-state` enforces it. Legacy
+  un-stamped snapshot files are **refused** unless you assert `--family normal`.
+  Re-take old snapshots with `markets snapshot` rather than asserting blindly —
+  a lognormal market read as normal quotes garbage (wire-identical views).
 - **An empty/parse-error response means rate-limited.** `expected value at
   line 1 column 1` is serde choking on an empty body — the endpoint is
   throttling you. The CLI now backs off and retries internally (with jitter,

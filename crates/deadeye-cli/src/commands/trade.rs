@@ -3,7 +3,16 @@
 //! `quote` is read-only; it preflights via `quote_trade` and prints a
 //! verdict plus a copy-pasteable execute hint. `execute` re-runs the
 //! quote (chain state may have moved), confirms, and submits via the
-//! family writer. `journal` opens / replays the on-disk journal.
+//! family writer. `loop` is the EV-gated arbitrage loop: each tick
+//! re-reads the market, re-loads the belief, runs the optimizer, and
+//! submits at most one trade — only when every EV / risk / budget gate
+//! passes, and only when `--execute` is set (observe-only otherwise).
+//! `journal` opens / replays the on-disk journal.
+//!
+//! The market family is auto-detected per command (issue #38) — normal
+//! and lognormal AMMs are wire-identical, so detection is semantic
+//! (indexer / class hash / factory), never a reader probe; pass
+//! `--family` to force it.
 
 use anyhow::{Context as _, Result};
 use deadeye_core::Sq128;

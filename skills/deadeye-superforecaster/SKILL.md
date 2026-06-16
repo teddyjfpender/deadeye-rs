@@ -211,6 +211,15 @@ Mind RPC etiquette (see the deadeye-cli skill): snapshot state once with
 zero further RPC, then one `--dry-run` and one `execute`. Never retry in a
 loop — an empty/parse-error response means rate-limited; back off.
 
+To run the ladder hands-off, `deadeye forecast loop <MARKET>` re-reads the
+market each tick, re-loads your committed snapshot as the belief, and submits
+at most one trade per tick — only when every EV / risk / budget gate passes.
+It is **observe-only until `--execute`**, so you can watch the gates fire
+first, and it self-throttles on `--interval` (don't wrap one-shot commands in a
+shell loop). Re-committing `forecast snapshot` mid-loop takes effect live, so
+this is also the clean way to keep a position tracking an evolving belief —
+not a licence to skip step 10's discipline.
+
 ### 10. Monitor, re-run, score
 
 Re-run when watched inputs move materially (re-record evidence, re-aggregate,

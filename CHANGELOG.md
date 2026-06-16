@@ -6,6 +6,132 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing unreleased — the latest tagged release is below._
+
+## [0.1.20] - 2026-06-13
+
+### Added
+
+- `deadeye trade loop` — an EV-gated belief-arbitrage loop. Each tick reads a
+  fresh market snapshot, loads the belief (`--from-forecast` re-reads the
+  committed forecast snapshot every tick, or explicit `--belief`/`--belief-sigma`),
+  runs the same optimizer as `trade quote --belief --budget`, evaluates every
+  gate, and submits at most one trade. **Observe-only unless `--execute`**;
+  appends one JSONL row per tick (skips included, with the gating reason).
+  Gates: `--min-ev`, `--min-edge-bps`, `--max-cvar` (normal family),
+  `--max-collateral`, `--cooldown`, `--session-budget`, `--daily-budget`,
+  `--max-drift-from-belief`, `--stop-if-forecast-stale`; hard bounds:
+  `--max-trades`, `--max-runtime` (at least one required); `--dry-run-first`
+  simulates before each submit. Never prompts, never retries a failed submit.
+- `deadeye forecast loop` — the sibling that pre-wires the committed forecast
+  snapshot as the belief (`trade loop --from-forecast`).
+- `LognormalMarketReader::market_status()` — initialised/paused/settled reader,
+  matching the normal family.
+
+### Changed
+
+- **⚠ Breaking — state snapshots are now family-stamped.** `markets snapshot`
+  gained `--family` and the emitted JSON carries a `family` field;
+  `trade quote --from-state` enforces it and **refuses legacy un-stamped
+  snapshot files** unless you assert `--family normal`. Re-take old snapshots
+  with `deadeye markets snapshot` — pre-fix snapshots of lognormal markets are
+  indistinguishable from normal ones and quote garbage.
+
+### Fixed
+
+- **Family auto-detection (#38).** `trade`/`markets`/`position`/`claim`/`watch`/
+  `lp`/`doctor` previously probed each family's reader to guess the market
+  family — but normal and lognormal AMMs are wire-identical on every shared
+  view, so the probe always concluded "normal" and silently ran normal-family
+  math on lognormal markets (wrong `x*`, collateral ~13× off, wrong EV, yet
+  `on_chain_will_accept: true`). Detection now uses a semantic ladder — indexer
+  `marketType` → market class hash vs the bundled deployment manifest → factory
+  `market_type_for_market` — and **errors asking for `--family` when
+  inconclusive** rather than guessing.
+
+## [0.1.19] - 2026-06-11
+
+### Changed
+
+- `install.sh` self-references the canonical `deadeye.wtf` URL (docs-only).
+
+## [0.1.16 – 0.1.18] - 2026-06-11
+
+### Added
+
+- **HD-derived account fleets** — one mnemonic deterministically derives many
+  Deadeye accounts (`deadeye/hd/v1` derivation path), so an operator can run a
+  fleet of agent wallets from a single seed.
+- `deadeye lp add` / `lp remove` — liquidity provisioning with the collateral
+  ERC-20 `approve` **bundled into the multicall** (no separate approve step;
+  fixes the zero-allowance revert).
+- New `forecast bayes` routine flags and market-curve aggregation helpers.
+
+### Changed
+
+- Trade sizing: `--risk` presets (conservative/balanced/aggressive), fractional
+  Kelly (`--bankroll` + `--kelly`), and a CVaR cap (`--max-cvar`).
+
+### Fixed
+
+- **⚠ Correctness — Sq128 σ encoding.** Lognormal candidate σ is now encoded
+  from the distribution (Sq128-exact) so the runtime's hint-consistency check
+  accepts it; this changed the numerical output of affected lognormal quotes.
+- Lognormal quote/execute parity: probe-first execution, an optimizer-driven
+  execute path, and accurate (typed) rejection reasons.
+
+## [0.1.15] - 2026-06-11
+
+### Added
+
+- Lognormal **EV-max trade optimizer** (`trade quote --belief --budget` on
+  lognormal markets, fully offline) plus documented per-trade movement caps
+  (σ-ratio ≤ 4×, |Δμ| ≤ 4σ).
+- New mainnet XP collateral token (20 000-XP initial grant).
+
+## [0.1.13] - 2026-06-10
+
+### Added
+
+- Documentation links throughout `--help` footers and a `deadeye docs` command
+  that prints the in-CLI documentation map.
+
+## [0.1.12] - 2026-06-10
+
+### Added
+
+- `forecast score` (CRPS / z-score vs the committed snapshot), `forecast
+  calibration` dashboard, and a shrink-to-market Bayesian helper (#25/#23/#21).
+- `position show` mark-to-market P&L, profit/breakeven intervals, quantiles,
+  market-impact, and settlement-lifecycle / claimable flags (#20/#21).
+- Trade risk tooling: `--risk` presets, Kelly sizing, downside/CVaR lines,
+  calibration-stress EV, and a pre-trade lint (#15/#24).
+- Fetch-once RPC state snapshots + rate-limit-aware exponential backoff (#14).
+- Agent skills: RPC etiquette, decide/size step, market-moves-as-evidence,
+  component decomposition, efficient-market edge gate, settlement lifecycle
+  (#16/#17/#21/#22/#23).
+
+## [0.1.5 – 0.1.11] - 2026-06-08 → 06-10
+
+### Added
+
+- `deadeye doctor` readiness preflight, always-on tracing, `collateral show`
+  (#6/#7/#11); `deadeye account deploy` (deploy a funded account); client-side
+  normal `trade quote` (no math-runtime needed) with the backing σ-floor
+  (#4/#5/#8/#15); `forecast` snapshot workspace → `forecast quote`/`forecast
+  trade` (#9); multi-leg (trade-lot) position tracking + settlement valuation
+  (#16); `config set`.
+- v0.13 ABI refresh with lognormal/bivariate/multinoulli multi-leg support.
+
+### Fixed
+
+- Chain-certified `x*` + simulate-first execution and the ERC-20 approve
+  bundled into the trade multicall, so trades land out of the box (#13);
+  optimizer maximizes EV s.t. collateral ≤ budget (#12); default to the Hetzner
+  mainnet indexer (removed Sepolia/Cartridge).
+
+## Earlier — crate, SDK & collateral foundations (≤ deadeye-cli 0.1.4)
+
 ### Added — deadeye-starknet v0.1.1
 
 - `CollateralTokenReader` / `CollateralTokenWriter` — typed view + write

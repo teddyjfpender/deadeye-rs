@@ -35,9 +35,17 @@ Documentation (https://deadeye.wtf/docs):
   /docs/glossary             μ, σ, k, λ, backing, XP — every term defined
   /docs/faq                  FAQ
 
+Automation:
+  account derive             HD account fleets from one seed (deadeye/hd/v1)
+  trade loop / forecast loop EV-gated arbitrage loop — observe-only until --execute
+  --family auto-detected     normal/lognormal are wire-identical; pass --family to force
+
 RPC etiquette: fetch state once (`markets snapshot`), explore candidates with
 `trade quote --from-state` (zero RPC), one dry-run, one execute. The CLI backs
-off automatically on rate limits — never wrap commands in retry loops.";
+off automatically on rate limits — never wrap commands in retry loops. For
+multi-tick automation use `trade loop` (the sanctioned self-throttling path: it
+honours `--interval` and the backoff between ticks) rather than re-invoking the
+one-shot commands in a shell loop.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -326,6 +334,11 @@ pub(crate) enum TradeCmd {
     /// deadeye trade loop 0xMARKET --from-forecast --interval 10m \
     ///     --min-ev 10 --max-trades 6 --budget 250 --max-collateral 250 --execute
     /// ```
+    #[command(
+        after_help = "Observe-only until --execute. The sanctioned multi-tick path: \
+it self-throttles on --interval + backoff, so never wrap one-shot commands in a \
+shell loop. Automation guide: https://deadeye.wtf/docs/trading"
+    )]
     Loop(TradeLoopArgs),
     /// Show / open / replay a trade journal.
     Journal(TradeJournalArgs),
@@ -1315,6 +1328,11 @@ pub(crate) enum ForecastCmd {
     /// deadeye forecast loop 0xMARKET --interval 10m --min-ev 10 \
     ///     --max-trades 6 --budget 250 --max-collateral 250 --execute
     /// ```
+    #[command(
+        after_help = "Observe-only until --execute. The sanctioned multi-tick path: \
+it self-throttles on --interval + backoff, so never wrap one-shot commands in a \
+shell loop. Forecasting guide: https://deadeye.wtf/docs/for-the-forecasters"
+    )]
     Loop(TradeLoopArgs),
     /// Run a Bayesian / aggregation routine (JSON in, JSON + rationale out).
     Bayes(ForecastBayesArgs),
