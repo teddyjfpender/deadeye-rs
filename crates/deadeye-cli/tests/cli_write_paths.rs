@@ -134,6 +134,88 @@ async fn deadeye_trade_quote_and_execute_devnet() {
         .expect("on_chain_will_accept field present");
     assert!(on_chain, "expected the candidate to be on-chain-acceptable");
 
+    // ── trade execute --dry-run (address-only) ──────────────────
+    let output = Command::new(cli_binary())
+        .arg("--output")
+        .arg("json")
+        .arg("--rpc-url")
+        .arg(env.url.as_str())
+        .env("DEADEYE_CHAIN_ID", &chain_id_hex)
+        .env("DEADEYE_ADDRESS", &trader_addr)
+        .env_remove("DEADEYE_PRIVATE_KEY")
+        .env("DEADEYE_NORMAL_RUNTIME_ADDR", &runtime_hex)
+        .arg("trade")
+        .arg("execute")
+        .arg(&market_hex)
+        .arg("--family")
+        .arg("normal")
+        .arg("--mean")
+        .arg("43.0")
+        .arg("--variance")
+        .arg("81.0")
+        .arg("--max-collateral")
+        .arg("100.0")
+        .arg("--dry-run")
+        .output()
+        .expect("spawn deadeye trade execute --dry-run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("trade dry-run stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        output.status.success(),
+        "trade execute --dry-run returned non-zero exit"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(parsed["action"], "trade(dry-run)");
+    assert_eq!(parsed["accepted"], true);
+    assert!(
+        parsed["call_count"].as_u64().unwrap_or(0) >= 2,
+        "dry-run simulates approve + execute_trade"
+    );
+
+    // ── trade execute --emit-calldata (address-only) ─────────────
+    let output = Command::new(cli_binary())
+        .arg("--output")
+        .arg("json")
+        .arg("--rpc-url")
+        .arg(env.url.as_str())
+        .env("DEADEYE_CHAIN_ID", &chain_id_hex)
+        .env("DEADEYE_ADDRESS", &trader_addr)
+        .env_remove("DEADEYE_PRIVATE_KEY")
+        .env("DEADEYE_NORMAL_RUNTIME_ADDR", &runtime_hex)
+        .arg("trade")
+        .arg("execute")
+        .arg(&market_hex)
+        .arg("--family")
+        .arg("normal")
+        .arg("--mean")
+        .arg("43.0")
+        .arg("--variance")
+        .arg("81.0")
+        .arg("--max-collateral")
+        .arg("100.0")
+        .arg("--emit-calldata")
+        .output()
+        .expect("spawn deadeye trade execute --emit-calldata");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("trade emit-calldata stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        output.status.success(),
+        "trade execute --emit-calldata returned non-zero exit"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(parsed["action"], "trade(emit-calldata)");
+    assert_eq!(parsed["account"], trader_addr);
+    assert_eq!(parsed["validated"], true);
+    let calls = parsed["calls"].as_array().expect("calls array");
+    assert!(
+        calls.len() >= 2,
+        "emitted calldata includes approve + execute_trade"
+    );
+    assert_eq!(calls[calls.len() - 2]["entrypoint"], "approve");
+    assert_eq!(calls[calls.len() - 1]["entrypoint"], "execute_trade");
+
     // ── trade execute ──────────────────────────────────────────
     let output = Command::new(cli_binary())
         .arg("--output")

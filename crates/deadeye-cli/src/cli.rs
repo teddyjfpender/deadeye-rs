@@ -466,6 +466,10 @@ pub(crate) struct TradeExecuteArgs {
     /// it to confirm a trade would land before paying a fee.
     #[arg(long)]
     pub(crate) dry_run: bool,
+    /// Build, chain-probe, simulate, and print the validated multicall JSON
+    /// without signing. Intended for wallet companions / external signers.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub(crate) emit_calldata: bool,
     /// ADVANCED/DIAGNOSTIC: override the off-chain-computed `x*` (collateral
     /// point) with an explicit value. Used to probe the on-chain verifier's
     /// stationary check. Offline path only.

@@ -39,7 +39,7 @@ use crate::{
         },
         trade::{
             COLLATERAL_BUFFER, NormalSolveOutcome, NormalSubmitOptions, SubmitOutcome,
-            solve_lognormal_candidate, solve_normal_candidate, submit_lognormal_quote,
+            SubmitMode, solve_lognormal_candidate, solve_normal_candidate, submit_lognormal_quote,
             submit_normal_quote,
         },
     },
@@ -919,7 +919,7 @@ async fn run_tick(
     }
     let opts = NormalSubmitOptions {
         max_collateral: effective_ceiling,
-        dry_run: false,
+        mode: SubmitMode::Submit,
         runtime,
         x_star_override: None,
         journal: Some(crate::commands::trade::default_journal_path()?),
@@ -929,7 +929,7 @@ async fn run_tick(
     };
     if args.dry_run_first {
         let dry_opts = NormalSubmitOptions {
-            dry_run: true,
+            mode: SubmitMode::DryRun,
             journal: None,
             ..opts.clone()
         };
@@ -962,6 +962,9 @@ async fn run_tick(
             SubmitOutcome::Submitted { .. } => {
                 unreachable!("dry_run=true never submits")
             },
+            SubmitOutcome::EmitCalldata(_) => {
+                unreachable!("trade loop never emits calldata")
+            },
         }
     }
 
@@ -976,6 +979,7 @@ async fn run_tick(
             record.note = result.note;
         },
         SubmitOutcome::DryRun(_) => unreachable!("dry_run=false never simulates only"),
+        SubmitOutcome::EmitCalldata(_) => unreachable!("trade loop never emits calldata"),
         SubmitOutcome::Submitted {
             result,
             supplied_gross_xp,

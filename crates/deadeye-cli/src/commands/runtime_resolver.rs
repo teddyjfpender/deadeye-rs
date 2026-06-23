@@ -9,7 +9,8 @@
 //!   fails the caller gets an error asking for `--family`, because normal and
 //!   lognormal AMMs are wire-identical on every shared view and a wrong guess
 //!   silently produces wrong math.
-//! * Owned-account construction from the resolved config + private-key env var.
+//! * Owned-account construction from the resolved config + private-key env var,
+//!   plus address-only simulation accounts for keyless dry-run/calldata flows.
 //!
 //! All resolution failures are surfaced as `anyhow::Error` with a hint
 //! about which flag / env var would fix it.
@@ -325,6 +326,20 @@ pub(crate) fn build_owned_account(ctx: &AppContext) -> Result<OwnedAccount> {
         .with_context(|| format!("invalid rpc_url: {}", ctx.config.rpc_url))?;
     let rpc = JsonRpcClient::new(HttpTransport::new(url));
     Ok(OwnedAccount::from_signing_key(rpc, address, key, chain_id))
+}
+
+/// Build an address-only [`OwnedAccount`] for skip-validation simulations.
+///
+/// This is used by `trade execute --dry-run` and `--emit-calldata` when the
+/// active profile has an address but no local private key. It cannot submit a
+/// transaction.
+pub(crate) fn build_simulation_account(ctx: &AppContext) -> Result<OwnedAccount> {
+    let address = ctx.resolved_address_felt()?;
+    let chain_id = parse_felt("chain_id", &ctx.config.chain_id)?;
+    let url = Url::parse(&ctx.config.rpc_url)
+        .with_context(|| format!("invalid rpc_url: {}", ctx.config.rpc_url))?;
+    let rpc = JsonRpcClient::new(HttpTransport::new(url));
+    Ok(OwnedAccount::for_simulation(rpc, address, chain_id))
 }
 
 /// Build a fresh provider-only client. Each call constructs its own HTTP

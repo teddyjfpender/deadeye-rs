@@ -99,6 +99,10 @@ deadeye trade loop 0xMARKET --from-forecast --interval 10m \
     --min-ev 10 --max-trades 6 --budget 250 --max-collateral 250
 # add --execute to actually submit; `forecast loop` is the same with the
 # committed forecast pre-wired as the belief.
+
+# External signer handoff — no private key needed in the CLI:
+deadeye trade execute 0xMARKET --family normal --mean 4.18 --variance 0.04 \
+    --max-collateral 100 --emit-calldata --output json
 ```
 
 **Family auto-detection.** Normal and lognormal AMMs are wire-identical on

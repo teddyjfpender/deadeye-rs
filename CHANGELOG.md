@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing unreleased — the latest tagged release is below._
 
+## [0.1.21] - 2026-06-23
+
+### Added
+
+- `deadeye trade execute --emit-calldata` — runs the normal quote,
+  chain-probe, fresh-wallet bootstrap, and gas-free simulation path, then emits
+  the validated account multicall as JSON for an external wallet/signer. The
+  payload labels `claim_initial_grant` when bundled, `approve`, and
+  `execute_trade`, includes calldata felts, and reports the simulation verdict.
+- Address-only simulation accounts for keyless no-submit flows. `trade execute
+  --dry-run` and `--emit-calldata` now work with `DEADEYE_ADDRESS` and no
+  `DEADEYE_PRIVATE_KEY`.
+
+### Fixed
+
+- `trade execute --dry-run` no longer hard-requires a local private key before
+  reaching the skip-validation simulation path (#43).
+- Real `trade execute` submissions still fail closed without a private key; the
+  keyless path is limited to dry-run/calldata emission.
+
 ## [0.1.20] - 2026-06-13
 
 ### Added

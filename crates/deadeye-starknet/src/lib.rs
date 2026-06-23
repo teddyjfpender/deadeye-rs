@@ -83,6 +83,7 @@ pub use provider::Provider;
 #[cfg(feature = "account")]
 pub use signer::{
     DeadeyeSigner, LocalSigner, RemoteSigner, RemoteSignerConfig, SignerAdapter, SignerError,
+    SimulationSigner,
 };
 pub use starknet_core::types::Felt;
 #[cfg(feature = "account")]

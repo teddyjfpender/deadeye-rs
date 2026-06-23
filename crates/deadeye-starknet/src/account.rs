@@ -123,6 +123,22 @@ mod owned {
             Self::with_signer(client, address, signer, chain_id)
         }
 
+        /// Construct an address-only account for skip-validation simulations.
+        ///
+        /// The account can run [`Self::simulate_calls`] and chain-probe helpers,
+        /// but any real submission fails before broadcast because the signer
+        /// intentionally cannot produce signatures.
+        #[must_use]
+        pub fn for_simulation(
+            client: JsonRpcClient<HttpTransport>,
+            address: Felt,
+            chain_id: Felt,
+        ) -> Self {
+            let signer: Arc<dyn DeadeyeSigner> =
+                Arc::new(crate::signer::SimulationSigner::new(Felt::ONE));
+            Self::with_signer(client, address, signer, chain_id)
+        }
+
         /// Construct an account from any [`DeadeyeSigner`] implementation.
         ///
         /// Use this for HSM/KMS-backed signers, MPC threshold signers,

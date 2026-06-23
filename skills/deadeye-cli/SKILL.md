@@ -233,6 +233,17 @@ deadeye trade execute <MARKET_ADDR> --mean <MU'> --variance <VAR'> \
     --max-collateral <XP_CAP> --dry-run
 ```
 
+For external-wallet / companion-signer setups, use `--emit-calldata` instead of
+putting a hot key in the CLI config. It runs the same quote, chain-probe, and
+simulation gate with only `DEADEYE_ADDRESS`, then prints the atomic account
+multicall (`claim_initial_grant` when needed, `approve`, `execute_trade`) as
+JSON:
+
+```bash
+deadeye trade execute <MARKET_ADDR> --mean <MU'> --variance <VAR'> \
+    --max-collateral <XP_CAP> --emit-calldata --output json
+```
+
 Afterwards:
 
 ```bash

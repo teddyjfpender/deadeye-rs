@@ -13,6 +13,9 @@
 //!   memory.
 //! * [`RemoteSigner`] — POSTs a Stark hash to an HTTP endpoint and parses the
 //!   returned `(r, s)`. Drop-in for HSM gateways or hosted-key services.
+//! * [`SimulationSigner`] — never signs and marks itself interactive so
+//!   provider-backed skip-validation simulations can be built for address-only
+//!   workflows.
 //!
 //! ## Wiring into [`crate::OwnedAccount`]
 //!
@@ -143,6 +146,45 @@ impl DeadeyeSigner for LocalSigner {
 
     fn is_interactive(&self) -> bool {
         false
+    }
+}
+
+// ─── SimulationSigner
+// ─────────────────────────────────────────────────────────
+
+/// Signer for address-only simulation paths.
+///
+/// Starknet transaction simulation with `skip_validate = true` can omit the
+/// signature entirely. This signer advertises itself as interactive so
+/// `starknet-accounts` skips signing in that mode, while any accidental real
+/// signing attempt fails loudly.
+#[derive(Debug, Clone, Copy)]
+pub struct SimulationSigner {
+    public_key: Felt,
+}
+
+impl SimulationSigner {
+    /// Construct a simulation signer with a placeholder public key.
+    #[must_use]
+    pub const fn new(public_key: Felt) -> Self {
+        Self { public_key }
+    }
+}
+
+#[async_trait]
+impl DeadeyeSigner for SimulationSigner {
+    async fn public_key(&self) -> Result<Felt, SignerError> {
+        Ok(self.public_key)
+    }
+
+    async fn sign_hash(&self, _hash: Felt) -> Result<[Felt; 2], SignerError> {
+        Err(SignerError::Config(
+            "simulation signer cannot sign real transactions".into(),
+        ))
+    }
+
+    fn is_interactive(&self) -> bool {
+        true
     }
 }
 
@@ -405,5 +447,16 @@ mod tests {
         // Sanity: signature verifies against the public key.
         let vk = starknet_signers::VerifyingKey::from_scalar(pk);
         assert!(vk.verify(&hash, &Signature { r, s }).unwrap());
+    }
+
+    #[tokio::test]
+    async fn simulation_signer_never_signs_and_is_interactive() {
+        let signer = SimulationSigner::new(Felt::ONE);
+        assert_eq!(signer.public_key().await.unwrap(), Felt::ONE);
+        assert!(signer.is_interactive());
+        assert!(matches!(
+            signer.sign_hash(Felt::from_hex("0x12345").unwrap()).await,
+            Err(SignerError::Config(_))
+        ));
     }
 }

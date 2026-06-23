@@ -33,6 +33,39 @@ fn help_mentions_deadeye() {
         .stdout(contains("Deadeye"));
 }
 
+#[test]
+fn trade_execute_help_mentions_emit_calldata() {
+    deadeye()
+        .args(["trade", "execute", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--emit-calldata"));
+}
+
+#[test]
+fn trade_execute_emit_calldata_conflicts_with_dry_run() {
+    deadeye()
+        .args([
+            "trade",
+            "execute",
+            "0x1",
+            "--family",
+            "normal",
+            "--mean",
+            "1.0",
+            "--variance",
+            "1.0",
+            "--max-collateral",
+            "1.0",
+            "--dry-run",
+            "--emit-calldata",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--dry-run"))
+        .stderr(contains("--emit-calldata"));
+}
+
 /// `deadeye config show` is offline-friendly: it must work when no
 /// config file is present and prints the resolved config from env vars.
 #[test]
