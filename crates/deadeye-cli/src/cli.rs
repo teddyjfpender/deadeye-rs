@@ -394,6 +394,15 @@ pub(crate) struct TradeQuoteArgs {
     /// Optimizer: budget (max collateral the trader will risk).
     #[arg(long)]
     pub(crate) budget: Option<f64>,
+    /// Opt into micro-edge search: return a chain-acceptable candidate whose
+    /// EV is at least this many XP, even when the default coarse EV-max grid
+    /// would snap back to no-trade. Normal-family offline quotes only.
+    #[arg(long, value_name = "XP")]
+    pub(crate) min_ev: Option<f64>,
+    /// User floor on required collateral for micro-edge search. The chain's
+    /// own min-trade-collateral still applies even when this is lower.
+    #[arg(long, value_name = "XP")]
+    pub(crate) min_collateral: Option<f64>,
     /// Optimizer: belief sigma (defaults to current market sigma).
     #[arg(long)]
     pub(crate) belief_sigma: Option<f64>,
@@ -452,6 +461,15 @@ pub(crate) struct TradeExecuteArgs {
     /// Cap the stake so 5% CVaR stays within this many XP (normal family).
     #[arg(long, value_name = "XP")]
     pub(crate) max_cvar: Option<f64>,
+    /// Opt into micro-edge search before execution: submit a chain-acceptable
+    /// candidate whose EV is at least this many XP. Normal-family offline
+    /// optimizer path only.
+    #[arg(long, value_name = "XP")]
+    pub(crate) min_ev: Option<f64>,
+    /// User floor on required collateral for micro-edge execution. The chain's
+    /// own min-trade-collateral still applies even when this is lower.
+    #[arg(long, value_name = "XP")]
+    pub(crate) min_collateral: Option<f64>,
     /// Maximum collateral the caller is willing to supply (STRK).
     #[arg(long)]
     pub(crate) max_collateral: f64,

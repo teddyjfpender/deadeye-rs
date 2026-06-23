@@ -66,6 +66,15 @@ fn trade_execute_emit_calldata_conflicts_with_dry_run() {
         .stderr(contains("--emit-calldata"));
 }
 
+#[test]
+fn collateral_show_alias_is_recognized() {
+    deadeye()
+        .args(["collateral", "show", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--account"));
+}
+
 /// `deadeye config show` is offline-friendly: it must work when no
 /// config file is present and prints the resolved config from env vars.
 #[test]
@@ -432,6 +441,73 @@ fn from_state_refuses_contradicting_family_flag() {
         .assert()
         .failure()
         .stderr(contains("contradicts"));
+}
+
+#[test]
+fn from_state_fixed_candidate_with_belief_reports_ev() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), Some("normal"));
+    let assert = quote_from_state_cmd(tmp.path())
+        .args([
+            "--from-state",
+            snap.to_str().unwrap(),
+            "--belief",
+            "43",
+            "--belief-sigma",
+            "7",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("quote JSON");
+    assert_eq!(parsed["belief_mean"].as_f64(), Some(43.0));
+    assert_eq!(parsed["belief_sigma"].as_f64(), Some(7.0));
+    assert!(
+        parsed["expected_value"].is_number(),
+        "fixed candidate quote should include belief EV: {parsed:#}"
+    );
+}
+
+#[test]
+fn from_state_micro_no_trade_reports_reason() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let snap = write_snapshot_fixture(tmp.path(), Some("normal"));
+    let assert = deadeye()
+        .env("DEADEYE_CONFIG", tmp.path().join("config.toml"))
+        .env("DEADEYE_RPC_URL", "http://127.0.0.1:1/rpc")
+        .env("DEADEYE_INDEXER_URL", "http://127.0.0.1:1/idx")
+        .args([
+            "trade",
+            "quote",
+            "0xabc",
+            "--from-state",
+            snap.to_str().unwrap(),
+            "--family",
+            "normal",
+            "--belief",
+            "42",
+            "--belief-sigma",
+            "8",
+            "--budget",
+            "10",
+            "--min-ev",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("quote JSON");
+    assert_eq!(parsed["on_chain_will_accept"].as_bool(), Some(false));
+    assert!(
+        parsed["no_trade_reason"]
+            .as_str()
+            .is_some_and(|s| s.contains("micro search found no candidate")),
+        "micro no-trade quote should include reason: {parsed:#}"
+    );
 }
 
 /// Legacy snapshots (no `family` field) are REFUSED by default — pre-fix

@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing unreleased — the latest tagged release is below._
 
+## [0.1.22] - 2026-06-23
+
+### Added
+
+- `deadeye trade quote --min-ev` and `deadeye trade execute --min-ev` for
+  opt-in normal-market micro-edge search. The search looks near the current
+  curve, keeps chain/offline acceptability checks intact, honors budget,
+  optional `--min-collateral`, `--max-cvar`, and Kelly sizing gates, and reports
+  an explicit `no_trade_reason` when no candidate clears the policy (#42).
+- Explicit normal candidates can now be evaluated under a supplied belief:
+  `trade quote --mean <x> --variance <v> --belief <x> --belief-sigma <s>`
+  populates EV, stress/CVaR fields, and sizing hints where applicable (#42).
+- `is_account_deployed()` is now available from `deadeye-starknet` and the SDK
+  JSON-RPC feature, giving callers a direct helper for first-trade account UX
+  instead of surfacing opaque `ContractNotFound` errors (#2).
+
+### Changed
+
+- Normal state snapshots now carry `min_trade_collateral`, and offline
+  fixed-candidate quoting rejects below-minimum trades consistently with the
+  chain preflight (#42).
+- Runtime prerequisite errors now point directly at
+  `deadeye admin deploy-math-runtime --family <family> --confirm`, and the
+  CLI/superforecaster skills document the runtime, account, gas, XP, RPC, and
+  active-market prerequisites up front (#11).
+
+### Fixed
+
+- Strengthened the chain-runtime optimizer parity test with anchored
+  sigma-tightening scenarios that must remain chain-acceptable and must use the
+  stationary point where it differs from the candidate mean (#1).
+- Added CLI coverage for the existing `deadeye collateral show` alias so the
+  papercut stays pinned (#11).
+
 ## [0.1.21] - 2026-06-23
 
 ### Added

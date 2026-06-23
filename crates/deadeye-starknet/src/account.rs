@@ -22,6 +22,35 @@ use crate::{
     execution::{Call, ExecutionReceipt, SimOutcome},
 };
 
+/// Returns whether an account contract is deployed at `address`.
+///
+/// This wraps Starknet's `get_class_hash_at(latest, address)` and treats
+/// `ContractNotFound` as `Ok(false)` instead of a provider error. That is the
+/// precondition check write-path bots need before submitting through a freshly
+/// derived account.
+#[cfg(feature = "provider")]
+pub async fn is_account_deployed<P>(
+    provider: &P,
+    address: starknet_core::types::Felt,
+) -> ContractResult<bool>
+where
+    P: starknet_providers::Provider + Sync,
+{
+    use starknet_core::types::{BlockId, BlockTag, StarknetError};
+    use starknet_providers::ProviderError;
+
+    match provider
+        .get_class_hash_at(BlockId::Tag(BlockTag::Latest), address)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(ProviderError::StarknetError(StarknetError::ContractNotFound)) => Ok(false),
+        Err(e) => Err(crate::error::ContractError::Provider(format!(
+            "get_class_hash_at: {e}"
+        ))),
+    }
+}
+
 /// Minimum surface every signing context must satisfy.
 #[async_trait]
 pub trait Account: Send + Sync {

@@ -58,7 +58,10 @@ pub(crate) fn resolve_runtime(cli_runtime: Option<&str>, family: Family) -> Resu
     resolve_runtime_opt(cli_runtime, family)?.with_context(|| {
         format!(
             "math runtime address required: pass `--runtime 0x...` or set `{env_var}` \
-             (normal-family quotes resolve this automatically — no runtime needed)"
+             (deploy or verify one with `deadeye admin deploy-math-runtime --family {} \
+             --confirm`, or inspect cached runtimes with `deadeye admin deploy-math-runtime \
+             --status`; normal-family quotes resolve this automatically — no runtime needed)",
+            family_label(family),
         )
     })
 }

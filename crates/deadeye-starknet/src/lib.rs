@@ -48,6 +48,8 @@ pub mod types;
 pub mod wallet_pool;
 
 pub use account::Account;
+#[cfg(feature = "provider")]
+pub use account::is_account_deployed;
 #[cfg(feature = "account")]
 pub use account::{
     AccountWithNonceManager, FeeBumpPolicy, FeeEstimate, GasParams, OwnedAccount, PriceUnit,

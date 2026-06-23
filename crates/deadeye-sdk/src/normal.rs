@@ -274,6 +274,10 @@ pub struct NormalMarketStateSnapshot {
     pub effective_k: f64,
     /// Human mirror of the pool backing in XP (display only).
     pub pool_backing_xp: f64,
+    /// AMM minimum net collateral for a trade, in XP. Older snapshots omit
+    /// this; the default keeps them readable but cannot enforce the floor.
+    #[serde(default)]
+    pub min_trade_collateral: f64,
 }
 
 /// Serde default for [`NormalMarketStateSnapshot::family`].
@@ -342,6 +346,7 @@ pub fn quote_candidate_from_state(
         candidate_variance,
         snapshot.effective_k_exact(),
         pool.to_f64(),
+        snapshot.min_trade_collateral,
     )
 }
 
@@ -488,6 +493,7 @@ fn quote_candidate_offline_inner(
     candidate_variance: f64,
     effective_k: f64,
     backing: f64,
+    min_trade_collateral: f64,
 ) -> SdkResult<NormalTradeQuote> {
     let cand_mean = Sq128::from_f64(candidate_mean)?;
     let cand_variance = Sq128::from_f64(candidate_variance)?;
@@ -529,6 +535,17 @@ fn quote_candidate_offline_inner(
         };
 
     let collateral_required = Sq128::from_f64(collateral_f64)?;
+    if collateral_f64 > 0.0 && collateral_f64 + 1e-12_f64 < min_trade_collateral {
+        return Ok(NormalTradeQuote {
+            candidate: candidate.to_raw(),
+            candidate_hints,
+            x_star: x_star.to_raw(),
+            required_collateral: collateral_required.to_raw(),
+            padded_collateral: collateral_required.to_raw(),
+            on_chain_will_accept: false,
+            rejection: Some(TradeRejectionReason::LowCollateral),
+        });
+    }
     Ok(NormalTradeQuote {
         candidate: candidate.to_raw(),
         candidate_hints,
@@ -992,6 +1009,7 @@ where
             sigma: current.sigma().to_f64(),
             effective_k,
             pool_backing_xp: pool_backing.to_f64(),
+            min_trade_collateral: Sq128::from_raw(params.min_trade_collateral).to_f64(),
         })
     }
 
@@ -1020,6 +1038,7 @@ where
             candidate_variance,
             effective_k,
             pool_backing.to_f64(),
+            Sq128::from_raw(params.min_trade_collateral).to_f64(),
         )
     }
 
@@ -1826,6 +1845,7 @@ mod tests {
             sigma: 0.0,
             effective_k: 0.0,
             pool_backing_xp: 0.0,
+            min_trade_collateral: 0.0,
         }
     }
 

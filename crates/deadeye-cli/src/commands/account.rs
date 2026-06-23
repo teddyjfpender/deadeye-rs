@@ -3,10 +3,10 @@
 use anyhow::{Context as _, Result, bail};
 use deadeye_starknet::Provider as _;
 use starknet_core::{
-    types::{BlockId, BlockTag, Felt, FunctionCall, StarknetError},
+    types::{BlockId, BlockTag, Felt, FunctionCall},
     utils::get_selector_from_name,
 };
-use starknet_providers::{JsonRpcClient, Provider as _, ProviderError, jsonrpc::HttpTransport};
+use starknet_providers::{JsonRpcClient, Provider as _, jsonrpc::HttpTransport};
 use url::Url;
 
 use crate::{
@@ -229,14 +229,9 @@ pub(crate) async fn is_deployed(
     provider: &JsonRpcClient<HttpTransport>,
     address: Felt,
 ) -> Result<bool> {
-    match provider
-        .get_class_hash_at(BlockId::Tag(BlockTag::PreConfirmed), address)
+    deadeye_starknet::is_account_deployed(provider, address)
         .await
-    {
-        Ok(_) => Ok(true),
-        Err(ProviderError::StarknetError(StarknetError::ContractNotFound)) => Ok(false),
-        Err(e) => Err(anyhow::anyhow!("could not check deployment status: {e}")),
-    }
+        .map_err(|e| anyhow::anyhow!("could not check deployment status: {e}"))
 }
 
 /// Read the STRK balance (low u128 limb) for `holder`.

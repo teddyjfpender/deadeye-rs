@@ -91,6 +91,18 @@ struct Scenario {
     budget: f64,
 }
 
+/// Named chain-runtime regressions for issue #1. These are the scenarios a
+/// pre-P4 `x_star = cand_mean` implementation bucketed as
+/// `OptimizerRejected`, so aggregate `accepted_count > 0` was too weak.
+#[derive(Debug, Clone, Copy)]
+struct AnchoredRuntimeScenario {
+    label: &'static str,
+    belief_mu: f64,
+    belief_sigma: f64,
+    budget: f64,
+    x_star_must_differ_from_candidate_mean: bool,
+}
+
 /// 30 scenarios spanning the policy envelope. Market is fixed at
 /// `N(μ=42, σ=8)`; budgets and beliefs sweep relative to that.
 ///
@@ -310,6 +322,32 @@ const fn scenarios() -> &'static [Scenario] {
             belief_mu: 50.0,
             belief_sigma: 10.0,
             budget: 100.0,
+        },
+    ]
+}
+
+const fn anchored_runtime_scenarios() -> &'static [AnchoredRuntimeScenario] {
+    &[
+        AnchoredRuntimeScenario {
+            label: "anchor σ↓ μ=eq",
+            belief_mu: 42.0,
+            belief_sigma: 1.5,
+            budget: 60.0,
+            x_star_must_differ_from_candidate_mean: false,
+        },
+        AnchoredRuntimeScenario {
+            label: "anchor σ↓ μ-small",
+            belief_mu: 44.0,
+            belief_sigma: 1.5,
+            budget: 60.0,
+            x_star_must_differ_from_candidate_mean: true,
+        },
+        AnchoredRuntimeScenario {
+            label: "anchor σ↓ μ-large",
+            belief_mu: 54.0,
+            belief_sigma: 2.0,
+            budget: 100.0,
+            x_star_must_differ_from_candidate_mean: true,
         },
     ]
 }
@@ -731,6 +769,57 @@ async fn optimize_quote_chain_runtime_must_be_accepted_by_chain() {
         .await
         .expect("read distribution")
         .to_raw();
+
+    // ── Phase 3b: anchored σ-tightening regressions (issue #1) ───────
+    for sc in anchored_runtime_scenarios() {
+        let quote = market
+            .optimize_quote(env.normal_runtime, sc.belief_mu, sc.belief_sigma, sc.budget)
+            .await
+            .unwrap_or_else(|e| panic!("{}: optimize_quote(chain) failed: {e:?}", sc.label));
+        let required = Sq128::from_raw(quote.required_collateral).to_f64();
+        let x_star = Sq128::from_raw(quote.x_star).to_f64();
+        let cand_mean = Sq128::from_raw(quote.candidate.mean).to_f64();
+        assert!(
+            quote.on_chain_will_accept,
+            "{}: chain-runtime optimizer must accept anchored σ-tightening scenario \
+             (pre-P4 regression bucketed this as optimizer-rejected; req_coll={required:.6})",
+            sc.label,
+        );
+        assert!(
+            required > 0.0,
+            "{}: accepted anchor must lock positive collateral",
+            sc.label,
+        );
+        if sc.x_star_must_differ_from_candidate_mean {
+            assert!(
+                (x_star - cand_mean).abs() > 1e-6,
+                "{}: x_star should be the stationary point, not the candidate mean \
+                 (x_star={x_star:.9}, cand_mean={cand_mean:.9})",
+                sc.label,
+            );
+        }
+        let supplied = max_raw(quote.required_collateral, quote.padded_collateral);
+        let check = check_trade_via_runtime(
+            &check_provider,
+            env.normal_runtime,
+            current_dist_at_setup,
+            quote.candidate,
+            quote.x_star,
+            supplied,
+            params.k,
+            params.backing,
+            params.tolerance,
+            params.min_trade_collateral,
+            quote.candidate_hints,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: independent check_trade_view failed: {e}", sc.label));
+        assert!(
+            check.is_valid,
+            "{}: independent check_trade_view rejected anchored optimizer output: {:?}",
+            sc.label, check.rejection_reason,
+        );
+    }
 
     // ── Phase 4: sweep scenarios ────────────────────────────────────
     let mut outcomes: Vec<(Scenario, Outcome)> = Vec::new();

@@ -112,6 +112,259 @@ impl NormalSolveOutcome {
     }
 }
 
+#[derive(Debug, Clone)]
+struct NormalMicroPolicy {
+    min_ev: f64,
+    min_collateral: Option<f64>,
+    bankroll: Option<f64>,
+    kelly_mult: Option<f64>,
+    max_cvar: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NormalMicroStats {
+    evaluated: usize,
+    chain_rejected: usize,
+    over_budget: usize,
+    below_min_collateral: usize,
+    below_min_ev: usize,
+    cvar_rejected: usize,
+    kelly_rejected: usize,
+    best_seen_ev: Option<f64>,
+    best_seen_collateral: Option<f64>,
+}
+
+impl NormalMicroStats {
+    fn record_seen(&mut self, ev: f64, collateral: f64) {
+        if self.best_seen_ev.is_none_or(|best| ev > best) {
+            self.best_seen_ev = Some(ev);
+            self.best_seen_collateral = Some(collateral);
+        }
+    }
+}
+
+fn normal_no_trade_reason(
+    quote: &deadeye_starknet::NormalTradeQuote,
+    expected_value: Option<f64>,
+    budget: Option<f64>,
+) -> Option<String> {
+    let required = Sq128::from_raw(quote.required_collateral).to_f64();
+    if quote.on_chain_will_accept && required > 0.0 {
+        return None;
+    }
+    if let Some(rejection) = quote.rejection {
+        return Some(format!(
+            "candidate rejected by chain preflight: {rejection:?}"
+        ));
+    }
+    if required <= 0.0 {
+        return Some(
+            "no trade: candidate equals the current market or requires zero collateral".to_owned(),
+        );
+    }
+    if let Some(ev) = expected_value
+        && ev <= 0.0
+    {
+        return Some(format!(
+            "no trade: candidate EV {ev:+.6} XP is not positive under the supplied belief"
+        ));
+    }
+    if let Some(budget) = budget
+        && required > budget
+    {
+        return Some(format!(
+            "no trade: required collateral {required:.6} XP exceeds budget {budget:.6} XP"
+        ));
+    }
+    Some("no trade: candidate failed the offline acceptance gates".to_owned())
+}
+
+fn micro_no_trade_reason(
+    stats: NormalMicroStats,
+    budget: f64,
+    min_ev: f64,
+    min_collateral: f64,
+    max_cvar: Option<f64>,
+    kelly_active: bool,
+) -> String {
+    let best = match (stats.best_seen_ev, stats.best_seen_collateral) {
+        (Some(ev), Some(collateral)) => {
+            format!(
+                "; best chain-accepted candidate seen had EV {ev:+.6} XP at {collateral:.6} XP collateral"
+            )
+        },
+        _ => String::new(),
+    };
+    let mut gates = format!(
+        "micro search found no candidate clearing chain acceptance, budget {budget:.6} XP, \
+         min EV {min_ev:.6} XP, and min collateral {min_collateral:.6} XP"
+    );
+    if let Some(max_cvar) = max_cvar {
+        gates.push_str(&format!(", with --max-cvar {max_cvar:.6} XP"));
+    }
+    if kelly_active {
+        gates.push_str(", with Kelly sizing");
+    }
+    format!(
+        "{gates}{best} (evaluated {}, chain-rejected {}, over-budget {}, below-min-collateral {}, \
+         below-min-ev {}, cvar-rejected {}, kelly-rejected {})",
+        stats.evaluated,
+        stats.chain_rejected,
+        stats.over_budget,
+        stats.below_min_collateral,
+        stats.below_min_ev,
+        stats.cvar_rejected,
+        stats.kelly_rejected,
+    )
+}
+
+/// Fine local search for small positive-EV normal trades (issue #42).
+///
+/// The default optimizer keeps its historical coarse EV-max behavior. This
+/// opt-in path deliberately searches the rectangle between the live market and
+/// the supplied belief so tiny mean/σ disagreements can surface as
+/// chain-acceptable candidates.
+fn solve_normal_micro_candidate(
+    snapshot: &deadeye_sdk::normal::NormalMarketStateSnapshot,
+    belief_mean: f64,
+    belief_sigma: f64,
+    budget: f64,
+    policy: &NormalMicroPolicy,
+) -> Result<Result<NormalSolve, String>> {
+    anyhow::ensure!(budget > 0.0, "--budget must be > 0");
+    anyhow::ensure!(belief_sigma > 0.0, "--belief-sigma must be > 0");
+    anyhow::ensure!(
+        policy.min_ev >= 0.0,
+        "--min-ev must be >= 0 (use 0 to allow any positive-EV micro trade)"
+    );
+    if let Some(min_collateral) = policy.min_collateral {
+        anyhow::ensure!(min_collateral >= 0.0, "--min-collateral must be >= 0");
+    }
+    if let Some(max_cvar) = policy.max_cvar {
+        anyhow::ensure!(max_cvar > 0.0, "--max-cvar must be > 0");
+    }
+
+    const STEPS: u32 = 100;
+    let min_collateral = policy
+        .min_collateral
+        .unwrap_or(snapshot.min_trade_collateral)
+        .max(snapshot.min_trade_collateral);
+    let mut best: Option<NormalSolve> = None;
+    let mut best_required = f64::INFINITY;
+    let mut stats = NormalMicroStats::default();
+
+    for mean_i in 0..=STEPS {
+        let mean_frac = f64::from(mean_i) / f64::from(STEPS);
+        let cand_mean = snapshot
+            .mean
+            .mul_add(1.0 - mean_frac, belief_mean * mean_frac);
+        for sigma_i in 0..=STEPS {
+            let sigma_frac = f64::from(sigma_i) / f64::from(STEPS);
+            let cand_sigma = snapshot
+                .sigma
+                .mul_add(1.0 - sigma_frac, belief_sigma * sigma_frac);
+            if cand_sigma <= 0.0 {
+                continue;
+            }
+            if (cand_mean - snapshot.mean).abs() < 1e-12_f64
+                && (cand_sigma - snapshot.sigma).abs() < 1e-12_f64
+            {
+                continue;
+            }
+            stats.evaluated += 1;
+            let quote = deadeye_sdk::normal::quote_candidate_from_state(
+                snapshot,
+                cand_mean,
+                cand_sigma * cand_sigma,
+            )
+            .map_err(|e| anyhow::anyhow!("quote_candidate_from_state: {e}"))?;
+            if !quote.on_chain_will_accept {
+                stats.chain_rejected += 1;
+                continue;
+            }
+            let required = Sq128::from_raw(quote.required_collateral).to_f64();
+            let ev = super::risk::expected_pnl(
+                snapshot.mean,
+                snapshot.sigma,
+                cand_mean,
+                cand_sigma,
+                snapshot.effective_k,
+                belief_mean,
+                belief_sigma,
+            );
+            stats.record_seen(ev, required);
+            if required > budget {
+                stats.over_budget += 1;
+                continue;
+            }
+            if required + 1e-12_f64 < min_collateral {
+                stats.below_min_collateral += 1;
+                continue;
+            }
+            if ev <= 0.0 || ev + 1e-12_f64 < policy.min_ev {
+                stats.below_min_ev += 1;
+                continue;
+            }
+            if let Some(max_cvar) = policy.max_cvar {
+                let cvar = super::risk::cvar_under_belief(
+                    snapshot.mean,
+                    snapshot.sigma,
+                    cand_mean,
+                    cand_sigma,
+                    snapshot.effective_k,
+                    belief_mean,
+                    belief_sigma,
+                    0.05,
+                );
+                if cvar.is_finite() && cvar < -max_cvar {
+                    stats.cvar_rejected += 1;
+                    continue;
+                }
+            }
+            let basis = if let Some(kelly_mult) = policy.kelly_mult {
+                let Some(advice) = super::risk::sizing_advice(
+                    ev,
+                    required,
+                    policy.bankroll.unwrap_or(0.0),
+                    kelly_mult,
+                ) else {
+                    stats.kelly_rejected += 1;
+                    continue;
+                };
+                if required > advice.recommended_stake_xp + 1e-12_f64 {
+                    stats.kelly_rejected += 1;
+                    continue;
+                }
+                format!("micro-kelly-{kelly_mult:.2}")
+            } else {
+                "micro-min-ev".to_owned()
+            };
+            if best.as_ref().is_none_or(|current| {
+                ev > current.expected_value
+                    || ((ev - current.expected_value).abs() < 1e-12_f64 && required < best_required)
+            }) {
+                best_required = required;
+                best = Some(NormalSolve {
+                    quote,
+                    expected_value: ev,
+                    sizing_basis: basis,
+                });
+            }
+        }
+    }
+
+    Ok(best.ok_or_else(|| {
+        micro_no_trade_reason(
+            stats,
+            budget,
+            policy.min_ev,
+            min_collateral,
+            policy.max_cvar,
+            policy.kelly_mult.is_some(),
+        )
+    }))
+}
+
 /// Shared by `trade quote`, `trade quote --from-state`, `trade execute`
 /// and `trade loop` so every path sizes stakes identically.
 pub(crate) fn solve_normal_candidate(
@@ -402,44 +655,146 @@ fn quote_normal_from_state(
     }
     let market_mean = snapshot.mean;
     let market_sigma = snapshot.sigma;
+    let market_hex = snapshot.market.clone();
+    anyhow::ensure!(
+        args.min_ev.is_some() || args.min_collateral.is_none(),
+        "--min-collateral only applies with --min-ev micro-edge search"
+    );
 
     let kelly_mult = args
         .kelly
         .or_else(|| args.risk.as_deref().and_then(super::risk::preset_fraction));
-    let (quote, belief, budget, expected_value, sizing_basis) =
-        if let (Some(belief_mean), Some(budget)) = (args.belief, args.budget) {
+    let has_direct_candidate = args.mean.is_some() || args.variance.is_some();
+    anyhow::ensure!(
+        !has_direct_candidate || (args.min_ev.is_none() && args.min_collateral.is_none()),
+        "--min-ev/--min-collateral select optimizer micro-edge search; omit them with explicit --mean/--variance"
+    );
+    let (quote, belief, budget, expected_value, sizing_basis, no_trade_reason) =
+        if has_direct_candidate {
+            let mean = args
+                .mean
+                .context("`--mean` is required when quoting an explicit candidate")?;
+            let variance = args
+                .variance
+                .context("`--variance` is required when quoting an explicit candidate")?;
+            let q = quote_candidate_from_state(&snapshot, mean, variance)
+                .map_err(|e| anyhow::anyhow!("quote_candidate_from_state: {e}"))?;
+            let belief = args
+                .belief
+                .map(|belief_mean| (belief_mean, args.belief_sigma.unwrap_or(market_sigma)));
+            let cand_mean = Sq128::from_raw(q.candidate.mean).to_f64();
+            let cand_sigma = Sq128::from_raw(q.candidate.sigma).to_f64();
+            let expected_value = belief.map(|(belief_mean, belief_sigma)| {
+                super::risk::expected_pnl(
+                    market_mean,
+                    market_sigma,
+                    cand_mean,
+                    cand_sigma,
+                    snapshot.effective_k,
+                    belief_mean,
+                    belief_sigma,
+                )
+            });
+            let no_trade_reason = normal_no_trade_reason(&q, expected_value, args.budget);
+            (
+                q,
+                belief,
+                args.budget,
+                expected_value,
+                None,
+                no_trade_reason,
+            )
+        } else if let (Some(belief_mean), Some(budget)) = (args.belief, args.budget) {
             let belief_sigma = args.belief_sigma.unwrap_or(market_sigma);
-            // Sizing policy (issue #33) — pure re-quotes, zero RPC.
-            let solve = solve_normal_candidate(
-                &snapshot,
-                belief_mean,
-                belief_sigma,
-                budget,
-                args.bankroll,
-                kelly_mult,
-                args.max_cvar,
-            )?
-            .into_solve()?;
+            let solve = if let Some(min_ev) = args.min_ev {
+                anyhow::ensure!(
+                    args.runtime.is_none(),
+                    "--min-ev micro-edge search is offline-only; drop --runtime"
+                );
+                let policy = NormalMicroPolicy {
+                    min_ev,
+                    min_collateral: args.min_collateral,
+                    bankroll: args.bankroll,
+                    kelly_mult,
+                    max_cvar: args.max_cvar,
+                };
+                match solve_normal_micro_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    &policy,
+                )? {
+                    Ok(solve) => solve,
+                    Err(reason) => {
+                        let q = deadeye_sdk::normal::quote_candidate_from_state(
+                            &snapshot,
+                            market_mean,
+                            market_sigma * market_sigma,
+                        )
+                        .map_err(|e| anyhow::anyhow!("quote_candidate_from_state: {e}"))?;
+                        return Ok(QuoteResult {
+                            family: "normal",
+                            market: market_hex,
+                            candidate_mean: Some(market_mean),
+                            candidate_variance: Some(market_sigma * market_sigma),
+                            candidate_sigma: Some(market_sigma),
+                            candidate_mu1: None,
+                            candidate_mu2: None,
+                            candidate_rho: None,
+                            x_star: Some(Sq128::from_raw(q.x_star).to_f64()),
+                            required_collateral: Some(0.0),
+                            padded_collateral: Some(0.0),
+                            sigma_floor: None,
+                            market_mean: Some(market_mean),
+                            market_sigma: Some(market_sigma),
+                            belief_mean: Some(belief_mean),
+                            belief_sigma: Some(belief_sigma),
+                            expected_value: Some(0.0),
+                            budget: Some(budget),
+                            on_chain_will_accept: false,
+                            rejection: None,
+                            no_trade_reason: Some(reason),
+                            downside_at_market_mean: None,
+                            cvar_5pct: None,
+                            stress_ev: None,
+                            sizing: None,
+                            sizing_basis: Some("micro-min-ev".to_owned()),
+                            warnings: Vec::new(),
+                            execute_hint: format!(
+                                "deadeye trade quote {} --family normal --belief {:.6} --belief-sigma {:.6} --budget {:.6} --min-ev {:.6}",
+                                snapshot.market, belief_mean, belief_sigma, budget, min_ev
+                            ),
+                        });
+                    },
+                }
+            } else {
+                // Sizing policy (issue #33) — pure re-quotes, zero RPC.
+                solve_normal_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    args.bankroll,
+                    kelly_mult,
+                    args.max_cvar,
+                )?
+                .into_solve()?
+            };
+            let no_trade_reason =
+                normal_no_trade_reason(&solve.quote, Some(solve.expected_value), Some(budget));
             (
                 solve.quote,
                 Some((belief_mean, belief_sigma)),
                 Some(budget),
                 Some(solve.expected_value),
                 Some(solve.sizing_basis),
+                no_trade_reason,
             )
         } else {
-            let mean = args
-                .mean
-                .context("`--mean` is required (or pair --belief / --budget)")?;
-            let variance = args
-                .variance
-                .context("`--variance` is required (or pair --belief / --budget)")?;
-            let q = quote_candidate_from_state(&snapshot, mean, variance)
-                .map_err(|e| anyhow::anyhow!("quote_candidate_from_state: {e}"))?;
-            (q, None, None, None, None)
+            anyhow::bail!("`--mean`/`--variance` or `--belief`/`--budget` is required")
         };
 
-    let market_hex = snapshot.market.clone();
     let cand_mean = Sq128::from_raw(quote.candidate.mean).to_f64();
     let cand_sigma = Sq128::from_raw(quote.candidate.sigma).to_f64();
     let cand_variance = Sq128::from_raw(quote.candidate.variance).to_f64();
@@ -487,6 +842,7 @@ fn quote_normal_from_state(
         budget,
         on_chain_will_accept: quote.on_chain_will_accept,
         rejection: quote.rejection.as_ref().map(pretty_rejection),
+        no_trade_reason,
         downside_at_market_mean: extras.downside_at_market_mean,
         cvar_5pct: extras.cvar_5pct,
         stress_ev: extras.stress_ev,
@@ -524,14 +880,149 @@ async fn quote_normal(
         effective_k,
         snapshot.pool_backing_xp,
     ));
+    anyhow::ensure!(
+        args.min_ev.is_some() || args.min_collateral.is_none(),
+        "--min-collateral only applies with --min-ev micro-edge search"
+    );
 
     let kelly_mult = args
         .kelly
         .or_else(|| args.risk.as_deref().and_then(super::risk::preset_fraction));
-    let (quote, belief, budget, expected_value, sizing_basis) =
-        if let (Some(belief_mean), Some(budget)) = (args.belief, args.budget) {
+    let has_direct_candidate = args.mean.is_some() || args.variance.is_some();
+    anyhow::ensure!(
+        !has_direct_candidate || (args.min_ev.is_none() && args.min_collateral.is_none()),
+        "--min-ev/--min-collateral select optimizer micro-edge search; omit them with explicit --mean/--variance"
+    );
+    let (quote, belief, budget, expected_value, sizing_basis, no_trade_reason) =
+        if has_direct_candidate {
+            let mean = args
+                .mean
+                .context("`--mean` is required when quoting an explicit candidate")?;
+            let variance = args
+                .variance
+                .context("`--variance` is required when quoting an explicit candidate")?;
+            let q = if let Some(rt) = runtime {
+                // Optional chain-faithful path for a fixed candidate.
+                let cand_dist = deadeye_core::NormalDistribution::from_variance(
+                    Sq128::from_f64(mean)?,
+                    Sq128::from_f64(variance)?,
+                )?;
+                // Encode the raw FROM the dist so (σ, σ²) stays Sq128-exact —
+                // an f64-sqrt σ quantized independently fails the runtime's
+                // consistency check with an opaque Option::None (issue #36).
+                let candidate = deadeye_core::Distribution::to_raw(&cand_dist);
+                let x_star = match deadeye_sdk::collateral::normal_collateral(
+                    &current,
+                    &cand_dist,
+                    deadeye_sdk::collateral::MinimizationPolicy::standard(),
+                ) {
+                    Ok(s) => Sq128::from_f64(s.x_min)?.to_raw(),
+                    Err(_) => candidate.mean,
+                };
+                let supplied = Sq128::from_f64(args.pad.max(0.0))?.to_raw();
+                market_handle
+                    .reader()
+                    .quote_trade(rt, candidate, x_star, supplied, supplied)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("quote_trade: {e}"))?
+            } else {
+                // Default: fully client-side quote (no runtime, no tx, no gas).
+                deadeye_sdk::normal::quote_candidate_from_state(&snapshot, mean, variance)
+                    .context("quote_candidate_from_state")?
+            };
+            let belief = args
+                .belief
+                .map(|belief_mean| (belief_mean, args.belief_sigma.unwrap_or(market_sigma)));
+            let cand_mean = Sq128::from_raw(q.candidate.mean).to_f64();
+            let cand_sigma = Sq128::from_raw(q.candidate.sigma).to_f64();
+            let expected_value = belief.map(|(belief_mean, belief_sigma)| {
+                super::risk::expected_pnl(
+                    market_mean,
+                    market_sigma,
+                    cand_mean,
+                    cand_sigma,
+                    effective_k,
+                    belief_mean,
+                    belief_sigma,
+                )
+            });
+            let no_trade_reason = normal_no_trade_reason(&q, expected_value, args.budget);
+            (
+                q,
+                belief,
+                args.budget,
+                expected_value,
+                None,
+                no_trade_reason,
+            )
+        } else if let (Some(belief_mean), Some(budget)) = (args.belief, args.budget) {
             let belief_sigma = args.belief_sigma.unwrap_or(market_sigma);
-            let (q, ev, basis) = if let Some(rt) = runtime {
+            let (q, ev, basis) = if let Some(min_ev) = args.min_ev {
+                anyhow::ensure!(
+                    runtime.is_none(),
+                    "--min-ev micro-edge search is offline-only; drop --runtime"
+                );
+                let policy = NormalMicroPolicy {
+                    min_ev,
+                    min_collateral: args.min_collateral,
+                    bankroll: args.bankroll,
+                    kelly_mult,
+                    max_cvar: args.max_cvar,
+                };
+                match solve_normal_micro_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    &policy,
+                )? {
+                    Ok(solve) => (
+                        solve.quote,
+                        Some(solve.expected_value),
+                        Some(solve.sizing_basis),
+                    ),
+                    Err(reason) => {
+                        let q = deadeye_sdk::normal::quote_candidate_from_state(
+                            &snapshot,
+                            market_mean,
+                            market_sigma * market_sigma,
+                        )
+                        .context("quote_candidate_from_state")?;
+                        return Ok(QuoteResult {
+                            family: family_label(family),
+                            market: format!("{market:#x}"),
+                            candidate_mean: Some(market_mean),
+                            candidate_variance: Some(market_sigma * market_sigma),
+                            candidate_sigma: Some(market_sigma),
+                            candidate_mu1: None,
+                            candidate_mu2: None,
+                            candidate_rho: None,
+                            x_star: Some(Sq128::from_raw(q.x_star).to_f64()),
+                            required_collateral: Some(0.0),
+                            padded_collateral: Some(0.0),
+                            sigma_floor,
+                            market_mean: Some(market_mean),
+                            market_sigma: Some(market_sigma),
+                            belief_mean: Some(belief_mean),
+                            belief_sigma: Some(belief_sigma),
+                            expected_value: Some(0.0),
+                            budget: Some(budget),
+                            on_chain_will_accept: false,
+                            rejection: None,
+                            no_trade_reason: Some(reason),
+                            downside_at_market_mean: None,
+                            cvar_5pct: None,
+                            stress_ev: None,
+                            sizing: None,
+                            sizing_basis: Some("micro-min-ev".to_owned()),
+                            warnings: Vec::new(),
+                            execute_hint: format!(
+                                "deadeye trade quote {market:#x} --family normal --belief {belief_mean:.6} --belief-sigma {belief_sigma:.6} --budget {budget:.6} --min-ev {min_ev:.6}"
+                            ),
+                        });
+                    },
+                }
+            } else if let Some(rt) = runtime {
                 anyhow::ensure!(
                     kelly_mult.is_none() && args.max_cvar.is_none(),
                     "sizing caps (--kelly/--risk/--max-cvar) run on the offline quote path — \
@@ -565,51 +1056,17 @@ async fn quote_normal(
                     Some(solve.sizing_basis),
                 )
             };
+            let no_trade_reason = normal_no_trade_reason(&q, ev, Some(budget));
             (
                 q,
                 Some((belief_mean, belief_sigma)),
                 Some(budget),
                 ev,
                 basis,
+                no_trade_reason,
             )
         } else {
-            let mean = args
-                .mean
-                .context("`--mean` is required (or pair --belief / --budget)")?;
-            let variance = args
-                .variance
-                .context("`--variance` is required (or pair --belief / --budget)")?;
-            let q = if let Some(rt) = runtime {
-                // Optional chain-faithful path for a fixed candidate.
-                let cand_dist = deadeye_core::NormalDistribution::from_variance(
-                    Sq128::from_f64(mean)?,
-                    Sq128::from_f64(variance)?,
-                )?;
-                // Encode the raw FROM the dist so (σ, σ²) stays Sq128-exact —
-                // an f64-sqrt σ quantized independently fails the runtime's
-                // consistency check with an opaque Option::None (issue #36).
-                let candidate = deadeye_core::Distribution::to_raw(&cand_dist);
-                let x_star = match deadeye_sdk::collateral::normal_collateral(
-                    &current,
-                    &cand_dist,
-                    deadeye_sdk::collateral::MinimizationPolicy::standard(),
-                ) {
-                    Ok(s) => Sq128::from_f64(s.x_min)?.to_raw(),
-                    Err(_) => candidate.mean,
-                };
-                let supplied = Sq128::from_f64(args.pad.max(0.0))?.to_raw();
-                market_handle
-                    .reader()
-                    .quote_trade(rt, candidate, x_star, supplied, supplied)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("quote_trade: {e}"))?
-            } else {
-                // Default: fully client-side quote (no runtime, no tx, no gas).
-                deadeye_sdk::normal::quote_candidate_from_state(&snapshot, mean, variance)
-                    .context("quote_candidate_from_state")?
-            };
-            // Fixed-candidate quote has no belief → no expected value.
-            (q, None, None, None, None)
+            anyhow::bail!("`--mean`/`--variance` or `--belief`/`--budget` is required")
         };
 
     let cand_mean = Sq128::from_raw(quote.candidate.mean).to_f64();
@@ -672,6 +1129,10 @@ async fn quote_normal(
         budget,
         on_chain_will_accept: accept,
         rejection,
+        no_trade_reason: no_trade_reason.or_else(|| {
+            sub_floor
+                .then(|| "no trade: candidate sigma is below the market backing floor".to_owned())
+        }),
         downside_at_market_mean: extras.downside_at_market_mean,
         cvar_5pct: extras.cvar_5pct,
         stress_ev: extras.stress_ev,
@@ -690,6 +1151,10 @@ async fn quote_lognormal_optimized(
     budget: f64,
     args: &TradeQuoteArgs,
 ) -> Result<QuoteResult> {
+    anyhow::ensure!(
+        args.min_ev.is_none() && args.min_collateral.is_none(),
+        "--min-ev/--min-collateral are normal-family micro-edge search flags"
+    );
     let handle = client.lognormal_market(market);
     let current = handle
         .distribution()
@@ -788,6 +1253,7 @@ async fn quote_lognormal_optimized(
         // chain-probes + verifies before submitting.
         on_chain_will_accept: true,
         rejection: None,
+        no_trade_reason: None,
         downside_at_market_mean: None,
         cvar_5pct: None,
         stress_ev: None,
@@ -809,6 +1275,10 @@ async fn quote_lognormal(
     family: Family,
     args: &TradeQuoteArgs,
 ) -> Result<QuoteResult> {
+    anyhow::ensure!(
+        args.min_ev.is_none() && args.min_collateral.is_none(),
+        "--min-ev/--min-collateral are normal-family micro-edge search flags"
+    );
     // Optimizer path (issue: lognormal optimizer): --belief/--budget runs the
     // EV-max grid search fully client-side — no runtime, no tx. Belief is in
     // LOG space, matching the on-chain (μ, σ).
@@ -917,6 +1387,8 @@ async fn quote_lognormal(
         budget: None,
         on_chain_will_accept: quote.on_chain_will_accept,
         rejection,
+        no_trade_reason: (!quote.on_chain_will_accept && quote.rejection.is_none())
+            .then(|| "no trade: lognormal candidate failed runtime preflight".to_owned()),
         execute_hint,
     })
 }
@@ -954,6 +1426,15 @@ async fn execute_normal(
     // σ-floor, so a sub-σ-min candidate is rejected before submission.
     let runtime = resolve_runtime_opt(args.runtime.as_deref(), Family::Normal)?;
     let market_handle = client.normal_market(market);
+    anyhow::ensure!(
+        args.min_ev.is_some() || args.min_collateral.is_none(),
+        "--min-collateral only applies with --min-ev micro-edge search"
+    );
+    let has_direct_candidate = args.mean.is_some() || args.variance.is_some();
+    anyhow::ensure!(
+        !has_direct_candidate || (args.min_ev.is_none() && args.min_collateral.is_none()),
+        "--min-ev/--min-collateral select optimizer micro-edge search; omit them with explicit --mean/--variance"
+    );
 
     // Candidate: explicit --mean/--variance, or the same EV-max optimizer
     // `trade quote --belief/--budget` runs (issue #32) — the executed
@@ -973,36 +1454,64 @@ async fn execute_normal(
             let kelly_mult = args
                 .kelly
                 .or_else(|| args.risk.as_deref().and_then(super::risk::preset_fraction));
-            let solve = solve_normal_candidate(
-                &snapshot,
-                belief_mean,
-                belief_sigma,
-                budget,
-                args.bankroll,
-                kelly_mult,
-                args.max_cvar,
-            )?
-            .into_solve()?;
+            let solve = if let Some(min_ev) = args.min_ev {
+                anyhow::ensure!(
+                    runtime.is_none(),
+                    "--min-ev micro-edge execution is offline-only; drop --runtime"
+                );
+                let policy = NormalMicroPolicy {
+                    min_ev,
+                    min_collateral: args.min_collateral,
+                    bankroll: args.bankroll,
+                    kelly_mult,
+                    max_cvar: args.max_cvar,
+                };
+                match solve_normal_micro_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    &policy,
+                )? {
+                    Ok(solve) => solve,
+                    Err(reason) => anyhow::bail!("{reason}"),
+                }
+            } else {
+                solve_normal_candidate(
+                    &snapshot,
+                    belief_mean,
+                    belief_sigma,
+                    budget,
+                    args.bankroll,
+                    kelly_mult,
+                    args.max_cvar,
+                )?
+                .into_solve()?
+            };
             let q = solve.quote;
             let ev = solve.expected_value;
             let basis = &solve.sizing_basis;
             let required = Sq128::from_raw(q.required_collateral).to_f64();
             if !q.on_chain_will_accept || required <= 0.0 {
                 anyhow::bail!(
-                    "normal optimizer found no acceptable positive-EV trade under budget                      {budget} XP — the market may already price your belief; re-quote with                      `trade quote --belief/--budget` for diagnostics"
+                    "normal optimizer found no acceptable positive-EV trade under budget {budget} XP — \
+                     the market may already price your belief; re-quote with \
+                     `trade quote --belief/--budget` for diagnostics"
                 );
             }
             let m = Sq128::from_raw(q.candidate.mean).to_f64();
             let v = Sq128::from_raw(q.candidate.variance).to_f64();
             if ctx.renderer.mode() != OutputMode::Json {
                 eprintln!(
-                    "optimizer: EV-max candidate μ={m:.6}, σ²={v:.6} (EV {ev:+.4} XP,                      collateral ~{required:.4} XP, sizing_basis {basis})"
+                    "optimizer: EV-max candidate μ={m:.6}, σ²={v:.6} \
+                     (EV {ev:+.4} XP, collateral ~{required:.4} XP, sizing_basis {basis})"
                 );
             }
             (m, v)
         },
         _ => anyhow::bail!(
-            "normal execute needs either --mean/--variance or --belief/--budget              [--belief-sigma] (runs the same EV-max optimizer as `trade quote`)"
+            "normal execute needs either --mean/--variance or --belief/--budget \
+             [--belief-sigma] (runs the same EV-max optimizer as `trade quote`)"
         ),
     };
 
@@ -1553,6 +2062,10 @@ async fn execute_lognormal(
     confirm: bool,
     label: &'static str,
 ) -> Result<()> {
+    anyhow::ensure!(
+        args.min_ev.is_none() && args.min_collateral.is_none(),
+        "--min-ev/--min-collateral are normal-family micro-edge search flags"
+    );
     // A math-runtime address is OPTIONAL and diagnostic-only. The submit path
     // always drafts the quote off-chain and has the chain itself certify
     // x* + hints via the probe. (Issues #30/#31: the old runtime preflight fed

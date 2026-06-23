@@ -147,6 +147,8 @@ pub use deadeye_artifacts as artifacts;
 pub use deadeye_collateral as collateral;
 pub use deadeye_core as core;
 pub use deadeye_starknet as starknet;
+#[cfg(feature = "jsonrpc")]
+pub use deadeye_starknet::is_account_deployed;
 pub use error::{SdkError, SdkResult};
 pub use journal::{
     EntryKind, JournalEntry, JournalError, JournalSink, JournalledBivariateWriter,

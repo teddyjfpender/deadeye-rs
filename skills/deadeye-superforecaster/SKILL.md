@@ -22,6 +22,19 @@ The loop is auditable: every forecast is built from evidence and reference
 classes recorded in a per-market **workspace** (`deadeye forecast …`), so you
 can re-run it, defend it, and score it after resolution.
 
+## Prerequisites
+
+Before spending research time, run the readiness check:
+
+```bash
+deadeye doctor --market <MARKET>
+```
+
+You need a deployed account, gas STRK, claimed XP collateral, a reachable RPC,
+and a readable active market before execution. Quoting is client-side and does
+not require a math-runtime address; commands that explicitly ask for one will
+tell you to deploy or inspect it with `deadeye admin deploy-math-runtime`.
+
 ## The loop
 
 ```

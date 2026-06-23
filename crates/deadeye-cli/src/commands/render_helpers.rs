@@ -306,6 +306,10 @@ pub(crate) struct QuoteResult {
     pub(crate) budget: Option<f64>,
     pub(crate) on_chain_will_accept: bool,
     pub(crate) rejection: Option<RejectionExplanation>,
+    /// Human-readable reason for a deliberate no-trade quote when there is no
+    /// typed on-chain rejection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_trade_reason: Option<String>,
     /// P&L if the market settles exactly at today's market mean (XP) —
     /// the plain-terms cost of being wrong (issue #24).
     pub(crate) downside_at_market_mean: Option<f64>,
@@ -452,6 +456,9 @@ impl Render for QuoteResult {
             r.kv("what_this_means", rej.summary);
             r.kv("suggested_fix", rej.suggested_fix);
         }
+        if let Some(reason) = &self.no_trade_reason {
+            r.kv("no_trade_reason", reason);
+        }
         if self.on_chain_will_accept {
             println!();
             println!("  {}", r.dim("to execute, run:"));
@@ -535,6 +542,9 @@ impl Render for QuoteResult {
             }
             writeln!(w, "rejection_summary: {}", rej.summary)?;
             writeln!(w, "rejection_suggested_fix: {}", rej.suggested_fix)?;
+        }
+        if let Some(reason) = &self.no_trade_reason {
+            writeln!(w, "no_trade_reason: {reason}")?;
         }
         writeln!(w, "execute_hint: {}", self.execute_hint)
     }

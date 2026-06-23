@@ -157,7 +157,14 @@ verdict:
 deadeye trade quote <MARKET_ADDR> --belief <MU_YOU> --budget <XP_BUDGET> --belief-sigma <SIGMA_YOU>
 
 # Or quote a specific candidate distribution directly:
-deadeye trade quote <MARKET_ADDR> --mean <MU'> --variance <VAR'>
+deadeye trade quote <MARKET_ADDR> --mean <MU'> --variance <VAR'> \
+  --belief <MU_YOU> --belief-sigma <SIGMA_YOU>
+
+# For tiny positive edges that the coarse EV-max grid may skip, opt into
+# micro-edge search. Use --min-ev 0 to allow any positive-EV chain-accepted
+# micro trade, or raise it to your own XP threshold.
+deadeye trade quote <MARKET_ADDR> --belief <MU_YOU> --belief-sigma <SIGMA_YOU> \
+  --budget <XP_BUDGET> --min-ev 0 --min-collateral <XP_OPTIONAL>
 ```
 
 `trade quote` is read-only and **zero-config**: it reads market state and
@@ -166,6 +173,10 @@ contract, almost no extra RPC), so you see the quoted collateral and whether the
 chain will accept *before* spending anything. It also surfaces the market's
 **σ-floor** — the narrowest σ the pool backing can support; a candidate below it
 is rejected on-chain with `SIGMA_TOO_LOW`, so size your variance above the floor.
+When you supply `--belief` alongside an explicit `--mean/--variance`, the quote
+also reports EV, CVaR, stress EV, and sizing under that belief. When you use
+`--min-ev`, a zero-trade response includes `no_trade_reason` explaining which
+gate blocked the micro candidate.
 (`--runtime 0x...` still exists as an optional override to force the on-chain
 preflight path, but you never need it.)
 
