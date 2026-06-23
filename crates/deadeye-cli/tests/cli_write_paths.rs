@@ -207,14 +207,19 @@ async fn deadeye_trade_quote_and_execute_devnet() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(parsed["action"], "trade(emit-calldata)");
     assert_eq!(parsed["account"], trader_addr);
+    assert_eq!(parsed["account_address"], trader_addr);
     assert_eq!(parsed["validated"], true);
+    assert_eq!(parsed["preflight"]["is_valid"], true);
+    assert!(parsed["preflight"].get("computed_collateral").is_some());
     let calls = parsed["calls"].as_array().expect("calls array");
     assert!(
         calls.len() >= 2,
         "emitted calldata includes approve + execute_trade"
     );
     assert_eq!(calls[calls.len() - 2]["entrypoint"], "approve");
+    assert_eq!(calls[calls.len() - 2]["entry_point"], "approve");
     assert_eq!(calls[calls.len() - 1]["entrypoint"], "execute_trade");
+    assert_eq!(calls[calls.len() - 1]["entry_point"], "execute_trade");
 
     // ── trade execute ──────────────────────────────────────────
     let output = Command::new(cli_binary())

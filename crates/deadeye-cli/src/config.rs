@@ -36,6 +36,51 @@ pub(crate) struct ConfigFile {
     pub(crate) profiles: BTreeMap<String, ProfileConfig>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_signer_profile_resolves() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+            default_profile = "strkd"
+
+            [profiles.strkd]
+            rpc_url = "http://localhost:5050"
+            chain_id = "0x534e5f4d41494e"
+            address = "0x123"
+            signer = "external"
+
+            [profiles.strkd.external_signer]
+            kind = "strkd"
+            endpoint = "http://127.0.0.1:37643"
+            token_path = "~/.config/deadeye/strkd.json"
+            allowance_strategy = "skip-estimate"
+            "#,
+        )
+        .expect("config parses");
+        let profile = cfg.profiles.get("strkd").expect("profile");
+        assert_eq!(profile.signer.as_deref(), Some("external"));
+        let external = profile.external_signer.clone().expect("external signer");
+        assert_eq!(external.kind.as_deref(), Some("strkd"));
+        assert_eq!(
+            external.allowance_strategy.as_deref(),
+            Some("skip-estimate")
+        );
+        let resolved = ResolvedConfig::resolve(&cfg, ResolutionInputs::default()).expect("resolve");
+        assert!(resolved.uses_external_signer());
+        assert_eq!(resolved.address.as_deref(), Some("0x123"));
+        assert_eq!(
+            resolved
+                .external_signer
+                .as_ref()
+                .and_then(|config| config.endpoint.as_deref()),
+            Some("http://127.0.0.1:37643")
+        );
+    }
+}
+
 /// One named profile. Maps to a single RPC + indexer + address triple.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -50,6 +95,16 @@ pub(crate) struct ProfileConfig {
     pub(crate) address: Option<String>,
     /// ERC-20 collateral token (defaults to canonical STRK).
     pub(crate) strk_token: Option<String>,
+    /// Signing backend for write paths. Defaults to local private-key signing.
+    ///
+    /// Set to `"external"` to route submissions through
+    /// [`external_signer`](Self::external_signer) while keeping the CLI
+    /// address-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signer: Option<String>,
+    /// Companion wallet / external signer configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) external_signer: Option<ExternalSignerConfig>,
     /// Account private key (hex felt).
     ///
     /// Written by `deadeye onboard` so an agent can recover the wallet on
@@ -74,6 +129,32 @@ pub(crate) struct ProfileConfig {
     /// here beyond the derived private key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) derived_from: Option<String>,
+}
+
+/// External signer profile settings.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ExternalSignerConfig {
+    /// Adapter kind. Currently `strkd` is built in.
+    pub(crate) kind: Option<String>,
+    /// Discovery mode: `endpoint` or `port_lock`.
+    pub(crate) discovery: Option<String>,
+    /// Explicit wallet JSON-RPC endpoint, e.g. `http://127.0.0.1:37643`.
+    pub(crate) endpoint: Option<String>,
+    /// Optional path to a strkd `port.lock` file.
+    pub(crate) port_lock_path: Option<String>,
+    /// JSON file containing `token` and `client_id` / `clientId`.
+    pub(crate) token_path: Option<String>,
+    /// Bearer token. Prefer `token_path` or `DEADEYE_STRKD_TOKEN` over storing
+    /// this inline.
+    pub(crate) token: Option<String>,
+    /// Companion client id for the `X-Companion-Client` header.
+    pub(crate) client_id: Option<String>,
+    /// Whether the wallet should broadcast. Defaults to true for execute paths.
+    pub(crate) submit: Option<bool>,
+    /// How the adapter handles bundled approve+execute fee estimation.
+    /// Defaults to `skip-estimate` for strkd.
+    pub(crate) allowance_strategy: Option<String>,
 }
 
 /// Path resolver — returns `~/.config/deadeye/config.toml` unless
@@ -162,6 +243,11 @@ pub(crate) struct ResolvedConfig {
     pub(crate) private_key: Option<String>,
     /// `true` iff a private key is available (env or stored profile key).
     pub(crate) has_private_key: bool,
+    /// Selected write-path signer (`local` by default, `external` for wallet
+    /// companion submission).
+    pub(crate) signer: String,
+    /// External signer details, when configured.
+    pub(crate) external_signer: Option<ExternalSignerConfig>,
 }
 
 /// Inputs from the CLI that influence resolution.
@@ -174,6 +260,10 @@ pub(crate) struct ResolutionInputs {
 }
 
 impl ResolvedConfig {
+    pub(crate) fn uses_external_signer(&self) -> bool {
+        self.signer.eq_ignore_ascii_case("external")
+    }
+
     /// Resolve config in priority order:
     ///   1. CLI flag (passed in via `inputs`)
     ///   2. Env var (DEADEYE_RPC_URL, DEADEYE_INDEXER_URL, …)
@@ -214,6 +304,12 @@ impl ResolvedConfig {
         let strk_token = profile
             .strk_token
             .unwrap_or_else(|| STRK_TOKEN_ADDRESS.to_owned());
+        let signer = std::env::var("DEADEYE_SIGNER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or(profile.signer)
+            .unwrap_or_else(|| "local".to_owned());
+        let external_signer = profile.external_signer;
 
         // Env wins over the stored profile key so callers can override a
         // saved wallet without rewriting config.
@@ -232,6 +328,8 @@ impl ResolvedConfig {
             strk_token,
             private_key,
             has_private_key,
+            signer,
+            external_signer,
         })
     }
 }

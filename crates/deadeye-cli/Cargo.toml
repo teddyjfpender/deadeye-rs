@@ -1,7 +1,7 @@
 [package]
 name = "deadeye-cli"
 description = "Market-maker-grade command-line interface for the Deadeye Rust SDK."
-version = "0.1.22"
+version = "0.1.23"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -44,6 +44,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "si
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
 owo-colors = { version = "4", default-features = false, features = ["supports-colors"] }
 comfy-table = { version = "7", default-features = false }
 dirs = "5"

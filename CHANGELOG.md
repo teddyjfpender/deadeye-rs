@@ -8,6 +8,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing unreleased — the latest tagged release is below._
 
+## [0.1.23] - 2026-06-23
+
+### Added
+
+- Address-only external signer profiles for write paths: profiles can set
+  `signer = "external"` and configure `[profiles.<name>.external_signer]` with
+  the built-in `strkd` adapter. The adapter sends validated account multicalls
+  through `wallet_addInvokeTransaction`, includes `Authorization: Bearer ...`,
+  `X-Companion-Client`, per-request `chainId`, and explicit resource bounds to
+  avoid stale-allowance fee-estimation failures (#43).
+- Universal calldata handoff for keyless custody workflows. `--emit-calldata`
+  is now available on `trade execute`, `lp add`, `lp remove`, `claim`, and
+  `collateral claim-grant`; it builds the exact multicall, simulates it
+  keylessly, and emits JSON with `account_address`, `calls`, and `preflight`
+  fields (#43).
+- External signer documentation in `docs/EXTERNAL_SIGNERS.md`, including strkd
+  auth headers, port-lock/endpoint discovery, sign-vs-submit behavior,
+  per-request `chainId`, and the approve/estimation gotcha (#43).
+
+### Changed
+
+- `trade execute --emit-calldata` keeps its legacy JSON field names while also
+  exposing the design-level `account_address`, `entry_point`, and `preflight`
+  fields expected by wallet companions (#43).
+- `trade execute --dry-run` and `--emit-calldata` continue to use address-only
+  simulation accounts; `trade loop` now benefits from the same external-signer
+  submit path when the active profile selects `signer = "external"` (#43).
+
 ## [0.1.22] - 2026-06-23
 
 ### Added

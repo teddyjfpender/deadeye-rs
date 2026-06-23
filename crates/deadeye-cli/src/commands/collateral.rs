@@ -20,8 +20,12 @@ use starknet_core::types::{Felt, U256};
 use crate::{
     cli::{CollateralBalanceArgs, CollateralClaimGrantArgs, CollateralCmd},
     commands::{
+        call_bundle::{
+            CalldataInput, WriteMode, build_write_account, calldata_result, labels,
+            print_calldata_json, simulate_calls, submit_external_calls,
+        },
         render_helpers::{submission_from_receipt, submission_from_trade_error},
-        runtime_resolver::{build_owned_account, build_provider, parse_felt},
+        runtime_resolver::{build_provider, parse_felt},
     },
     context::AppContext,
     output::{OutputMode, Render, Renderer},
@@ -130,6 +134,8 @@ async fn claim_grant(args: CollateralClaimGrantArgs, ctx: &AppContext) -> Result
 
     let mode_label = if already_claimed {
         "skipped (already claimed)"
+    } else if args.emit_calldata {
+        "emit-calldata"
     } else if args.execute {
         "execute"
     } else {
@@ -156,19 +162,59 @@ async fn claim_grant(args: CollateralClaimGrantArgs, ctx: &AppContext) -> Result
         return Ok(());
     }
 
-    if !args.execute {
+    if !args.execute && !args.emit_calldata {
         ctx.renderer.print(&plan)?;
         return Ok(());
     }
 
-    // ── Submit ────────────────────────────────────────────────────────
-    let signer = build_owned_account(ctx)?;
+    // ── Submit / emit ─────────────────────────────────────────────────
+    let mode = if args.emit_calldata {
+        WriteMode::EmitCalldata
+    } else {
+        WriteMode::Submit
+    };
+    let signer = build_write_account(ctx, mode)?;
     let signer_addr = Account::address(&signer);
     if signer_addr != account_felt {
         bail!(
             "signer ({signer_addr:#x}) does not match --address ({account_felt:#x}); \
              claim_initial_grant is keyed on `caller`, so the wallet that signs IS the recipient",
         );
+    }
+    let calls = vec![deadeye_starknet::build_claim_initial_grant_call(token)];
+    let call_labels = labels(["claim_initial_grant"]);
+    if mode == WriteMode::EmitCalldata {
+        let sim = simulate_calls("claim_initial_grant(preflight)", token, &signer, &calls).await;
+        let result = calldata_result(CalldataInput {
+            action: "claim_initial_grant(emit-calldata)",
+            family: None,
+            target: token,
+            account: signer_addr,
+            calls: &calls,
+            labels: &call_labels,
+            simulation: &sim,
+            computed_collateral: None,
+        });
+        return print_calldata_json(&result);
+    }
+    if ctx.config.uses_external_signer() {
+        let sim = simulate_calls("claim_initial_grant(preflight)", token, &signer, &calls).await;
+        if !sim.accepted {
+            ctx.renderer.print(&plan)?;
+            return ctx.renderer.print(&sim);
+        }
+        let submission = submit_external_calls(
+            ctx,
+            "claim_initial_grant",
+            token,
+            signer_addr,
+            &calls,
+            &call_labels,
+        )
+        .await?;
+        plan.tx_hash = submission.tx_hash.clone();
+        ctx.renderer.print(&plan)?;
+        return ctx.renderer.print(&submission);
     }
     let writer = CollateralTokenWriter::new(reader, signer);
     let market_hex = format!("{token:#x}");

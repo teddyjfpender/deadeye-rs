@@ -18,6 +18,7 @@ use crate::{
 
 pub(crate) mod account;
 pub(crate) mod admin;
+pub(crate) mod call_bundle;
 pub(crate) mod claim;
 pub(crate) mod collateral;
 pub(crate) mod config_cmd;

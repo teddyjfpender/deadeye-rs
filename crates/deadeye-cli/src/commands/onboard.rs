@@ -194,6 +194,8 @@ fn save_profile(net: &NetParams, w: &wallet::Wallet, account_index: u32) -> Resu
         chain_id: Some(net.chain_id.clone()),
         address: Some(format!("{:#066x}", w.address)),
         strk_token: profile.strk_token.clone(),
+        signer: None,
+        external_signer: None,
         private_key: Some(format!("{:#066x}", w.private_key)),
         mnemonic: Some(w.mnemonic.clone()),
         account_class_hash: Some(format!("{:#066x}", w.class_hash)),

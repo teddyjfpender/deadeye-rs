@@ -255,6 +255,14 @@ deadeye trade execute <MARKET_ADDR> --mean <MU'> --variance <VAR'> \
     --max-collateral <XP_CAP> --emit-calldata --output json
 ```
 
+The same calldata handoff is available on `lp add`, `lp remove`, `claim`, and
+`collateral claim-grant`. To submit through strkd directly, use an address-only
+profile with `signer = "external"` and a `[profiles.<name>.external_signer]`
+section; Deadeye sends `Authorization: Bearer <token>`,
+`X-Companion-Client: <id>`, per-request `chainId`, and explicit resource bounds
+to avoid the bundled-approve fee-estimation allowance trap. Details:
+`docs/EXTERNAL_SIGNERS.md`.
+
 Afterwards:
 
 ```bash

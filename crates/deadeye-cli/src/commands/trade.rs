@@ -14,8 +14,6 @@
 //! (indexer / class hash / factory), never a reader probe; pass
 //! `--family` to force it.
 
-use std::io::{self, Write};
-
 use anyhow::{Context as _, Result};
 use deadeye_core::Sq128;
 use deadeye_sdk::{
@@ -24,26 +22,29 @@ use deadeye_sdk::{
     journal::{EntryKind, JournalEntry, TradeJournal},
 };
 use deadeye_starknet::{
-    Account, Call, Felt, LognormalMarketReader, LognormalMarketWriter, NormalMarketReader,
+    Account, Felt, LognormalMarketReader, LognormalMarketWriter, NormalMarketReader,
     NormalMarketWriter, TradeRejectionReason,
 };
-use serde::Serialize;
 use serde_json::json;
 
 use crate::{
     cli::{TradeCmd, TradeExecuteArgs, TradeJournalArgs, TradeQuoteArgs},
     commands::{
+        call_bundle::{
+            CalldataInput, CalldataResult, WriteMode, build_write_account, calldata_result, labels,
+            print_calldata_json, simulate_calls, submit_external_calls,
+        },
         render_helpers::{
             QuoteResult, SubmissionResult, pretty_rejection, submission_from_receipt,
             submission_from_trade_error,
         },
         runtime_resolver::{
-            build_owned_account, build_provider, build_simulation_account, family_label,
-            parse_felt, resolve_family, resolve_runtime, resolve_runtime_opt,
+            build_provider, family_label, parse_felt, resolve_family, resolve_runtime,
+            resolve_runtime_opt,
         },
     },
     context::{AppContext, CliProvider},
-    output::{OutputMode, Render, Renderer},
+    output::OutputMode,
 };
 
 /// Multiplier applied to the offline-computed required collateral when sizing
@@ -1517,7 +1518,7 @@ async fn execute_normal(
 
     let opts = NormalSubmitOptions {
         max_collateral: args.max_collateral,
-        mode: SubmitMode::from_flags(args.dry_run, args.emit_calldata),
+        mode: WriteMode::from_flags(args.dry_run, args.emit_calldata),
         runtime,
         x_star_override: args.x_star,
         journal: args.journal.clone(),
@@ -1540,7 +1541,7 @@ pub(crate) struct NormalSubmitOptions {
     /// Hard ceiling (XP) on the gross collateral the trade may supply.
     pub(crate) max_collateral: f64,
     /// Whether this pipeline submits or stops after validation.
-    pub(crate) mode: SubmitMode,
+    pub(crate) mode: WriteMode,
     /// Optional math-runtime address (chain-faithful preflight for normal;
     /// diagnostic probe fallback for lognormal).
     pub(crate) runtime: Option<Felt>,
@@ -1556,33 +1557,6 @@ pub(crate) struct NormalSubmitOptions {
     pub(crate) confirm: bool,
     /// Family label for the prompt text.
     pub(crate) label: &'static str,
-}
-
-/// Execution intent for the shared submit pipeline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SubmitMode {
-    /// Sign and submit after validation.
-    Submit,
-    /// Simulate the multicall gas-free and stop.
-    DryRun,
-    /// Emit validated calldata for an external signer and stop.
-    EmitCalldata,
-}
-
-impl SubmitMode {
-    const fn from_flags(dry_run: bool, emit_calldata: bool) -> Self {
-        if emit_calldata {
-            Self::EmitCalldata
-        } else if dry_run {
-            Self::DryRun
-        } else {
-            Self::Submit
-        }
-    }
-
-    const fn is_no_submit(self) -> bool {
-        !matches!(self, Self::Submit)
-    }
 }
 
 /// Typed result of a submit pipeline, so callers (the `trade execute`
@@ -1611,152 +1585,6 @@ pub(crate) enum SubmitOutcome {
         /// Chain-certified net requirement (XP).
         required_net_xp: f64,
     },
-}
-
-/// One Starknet account-call emitted for an external signer / wallet API.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct EmittedCall {
-    /// Contract address the account should call.
-    pub(crate) contract: String,
-    /// Human-readable entrypoint name inferred from the Deadeye bundle shape.
-    pub(crate) entrypoint: &'static str,
-    /// Entrypoint selector as a felt hex string.
-    pub(crate) selector: String,
-    /// Cairo calldata felts as hex strings.
-    pub(crate) calldata: Vec<String>,
-}
-
-/// Renderable result for `trade execute --emit-calldata`.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct CalldataResult {
-    pub(crate) action: &'static str,
-    pub(crate) family: &'static str,
-    pub(crate) market: String,
-    pub(crate) account: String,
-    pub(crate) call_count: usize,
-    /// `true` when the full multicall simulated without reverting.
-    pub(crate) validated: bool,
-    pub(crate) simulation_note: Option<String>,
-    pub(crate) calls: Vec<EmittedCall>,
-    pub(crate) note: String,
-}
-
-impl Render for CalldataResult {
-    fn render_pretty(&self, r: &Renderer) {
-        if self.validated {
-            r.success("calldata validated");
-        } else {
-            r.error("calldata simulation rejected");
-        }
-        r.kv("family", self.family);
-        r.kv("market", &self.market);
-        r.kv("account", &self.account);
-        r.kv("call_count", &self.call_count.to_string());
-        if let Some(note) = &self.simulation_note {
-            r.kv("simulation", note);
-        }
-        for (i, call) in self.calls.iter().enumerate() {
-            r.kv(
-                &format!("call_{i}"),
-                &format!(
-                    "{} {} calldata_felts={}",
-                    call.contract,
-                    call.entrypoint,
-                    call.calldata.len()
-                ),
-            );
-        }
-        r.kv("note", &self.note);
-    }
-
-    fn render_plain(&self, w: &mut dyn Write) -> io::Result<()> {
-        writeln!(w, "action: {}", self.action)?;
-        writeln!(w, "family: {}", self.family)?;
-        writeln!(w, "market: {}", self.market)?;
-        writeln!(w, "account: {}", self.account)?;
-        writeln!(w, "call_count: {}", self.call_count)?;
-        writeln!(w, "validated: {}", self.validated)?;
-        if let Some(note) = &self.simulation_note {
-            writeln!(w, "simulation_note: {note}")?;
-        }
-        for (i, call) in self.calls.iter().enumerate() {
-            writeln!(w, "call_{i}_contract: {}", call.contract)?;
-            writeln!(w, "call_{i}_entrypoint: {}", call.entrypoint)?;
-            writeln!(w, "call_{i}_selector: {}", call.selector)?;
-            writeln!(w, "call_{i}_calldata: {}", call.calldata.join(","))?;
-        }
-        writeln!(w, "note: {}", self.note)
-    }
-}
-
-fn build_trade_account(
-    ctx: &AppContext,
-    opts: &NormalSubmitOptions,
-) -> Result<deadeye_starknet::OwnedAccount> {
-    if ctx.config.has_private_key || !opts.mode.is_no_submit() {
-        build_owned_account(ctx)
-    } else {
-        build_simulation_account(ctx)
-    }
-}
-
-fn emitted_calls(calls: &[Call], leading_count: usize) -> Vec<EmittedCall> {
-    calls
-        .iter()
-        .enumerate()
-        .map(|(i, call)| EmittedCall {
-            contract: format!("{:#x}", call.to),
-            entrypoint: emitted_entrypoint(i, leading_count),
-            selector: format!("{:#x}", call.selector),
-            calldata: call
-                .calldata
-                .iter()
-                .map(|felt| format!("{felt:#x}"))
-                .collect(),
-        })
-        .collect()
-}
-
-const fn emitted_entrypoint(index: usize, leading_count: usize) -> &'static str {
-    if index < leading_count {
-        "claim_initial_grant"
-    } else if index == leading_count {
-        "approve"
-    } else if index == leading_count + 1 {
-        "execute_trade"
-    } else {
-        "unknown"
-    }
-}
-
-fn calldata_result(
-    family: &'static str,
-    market: Felt,
-    account: Felt,
-    calls: &[Call],
-    leading_count: usize,
-    simulation: &SubmissionResult,
-) -> CalldataResult {
-    CalldataResult {
-        action: "trade(emit-calldata)",
-        family,
-        market: format!("{market:#x}"),
-        account: format!("{account:#x}"),
-        call_count: calls.len(),
-        validated: simulation.accepted,
-        simulation_note: simulation.note.clone(),
-        calls: emitted_calls(calls, leading_count),
-        note: "No transaction submitted. Send these calls through an external signer as one account multicall."
-            .into(),
-    }
-}
-
-fn print_calldata_json(result: &CalldataResult) -> Result<()> {
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    serde_json::to_writer_pretty(&mut handle, result)?;
-    handle.write_all(b"\n")?;
-    Ok(())
 }
 
 /// Submit pipeline for a fixed normal candidate: offline (or runtime)
@@ -1851,7 +1679,7 @@ pub(crate) async fn submit_normal_quote(
         }));
     }
 
-    let account = build_trade_account(ctx, opts)?;
+    let account = build_write_account(ctx, opts.mode)?;
     let writer_provider = build_provider(ctx)?;
     let writer =
         NormalMarketWriter::new(NormalMarketReader::new(&writer_provider, market), account);
@@ -1946,7 +1774,7 @@ pub(crate) async fn submit_normal_quote(
     };
 
     if opts.interactive
-        && opts.mode == SubmitMode::Submit
+        && opts.mode == WriteMode::Submit
         && !opts.confirm
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && ctx.renderer.mode() != OutputMode::Json
@@ -1973,8 +1801,8 @@ pub(crate) async fn submit_normal_quote(
     // No-submit modes: build the full multicall once, simulate it gas-free,
     // then either render the verdict (`--dry-run`) or emit the calls for an
     // external signer (`--emit-calldata`).
-    if opts.mode.is_no_submit() {
-        let leading_count = leading.len();
+    if opts.mode.is_no_submit() || ctx.config.uses_external_signer() {
+        let labels = trade_call_labels(leading.len());
         let mut calls = leading;
         calls.extend(
             writer
@@ -1982,19 +1810,44 @@ pub(crate) async fn submit_normal_quote(
                 .await
                 .map_err(|e| anyhow::anyhow!("build trade calls: {e}"))?,
         );
-        let result = dry_run_render(market, writer.account(), &calls).await;
-        if opts.mode == SubmitMode::EmitCalldata {
+        let simulation = simulate_calls("trade(dry-run)", market, writer.account(), &calls).await;
+        if opts.mode == WriteMode::EmitCalldata {
             let account_address = deadeye_starknet::Account::address(writer.account());
             return Ok(SubmitOutcome::EmitCalldata(calldata_result(
-                opts.label,
-                market,
-                account_address,
-                &calls,
-                leading_count,
-                &result,
+                CalldataInput {
+                    action: "trade(emit-calldata)",
+                    family: Some(opts.label),
+                    target: market,
+                    account: account_address,
+                    calls: &calls,
+                    labels: &labels,
+                    simulation: &simulation,
+                    computed_collateral: Some(Sq128::from_raw(quote.required_collateral).to_f64()),
+                },
             )));
         }
-        return Ok(SubmitOutcome::DryRun(result));
+        if ctx.config.uses_external_signer() {
+            if !simulation.accepted {
+                return Ok(SubmitOutcome::PreflightRejected(simulation));
+            }
+            let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
+            let required_net_xp = Sq128::from_raw(quote.required_collateral).to_f64();
+            let submission = submit_external_calls(
+                ctx,
+                "trade",
+                market,
+                deadeye_starknet::Account::address(writer.account()),
+                &calls,
+                &labels,
+            )
+            .await?;
+            return Ok(SubmitOutcome::Submitted {
+                result: submission,
+                supplied_gross_xp,
+                required_net_xp,
+            });
+        }
+        return Ok(SubmitOutcome::DryRun(simulation));
     }
 
     let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
@@ -2052,6 +1905,13 @@ where
     vec![deadeye_starknet::build_claim_initial_grant_call(
         collateral_token,
     )]
+}
+
+fn trade_call_labels(leading_count: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(leading_count + 2);
+    out.extend((0..leading_count).map(|_| "claim_initial_grant".to_owned()));
+    out.extend(labels(["approve", "execute_trade"]));
+    out
 }
 
 async fn execute_lognormal(
@@ -2141,7 +2001,7 @@ async fn execute_lognormal(
 
     let opts = NormalSubmitOptions {
         max_collateral: args.max_collateral,
-        mode: SubmitMode::from_flags(args.dry_run, args.emit_calldata),
+        mode: WriteMode::from_flags(args.dry_run, args.emit_calldata),
         runtime,
         x_star_override: None,
         journal: args.journal.clone(),
@@ -2210,7 +2070,7 @@ pub(crate) async fn submit_lognormal_quote(
         rejection: None,
     };
 
-    let account = build_trade_account(ctx, opts)?;
+    let account = build_write_account(ctx, opts.mode)?;
     let writer_provider = build_provider(ctx)?;
     let writer = LognormalMarketWriter::new(
         LognormalMarketReader::new(&writer_provider, market),
@@ -2346,7 +2206,7 @@ pub(crate) async fn submit_lognormal_quote(
     };
 
     if opts.interactive
-        && opts.mode == SubmitMode::Submit
+        && opts.mode == WriteMode::Submit
         && !opts.confirm
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && ctx.renderer.mode() != OutputMode::Json
@@ -2373,8 +2233,8 @@ pub(crate) async fn submit_lognormal_quote(
     // No-submit modes: build the full multicall once, simulate it gas-free,
     // then either render the verdict (`--dry-run`) or emit the calls for an
     // external signer (`--emit-calldata`).
-    if opts.mode.is_no_submit() {
-        let leading_count = leading.len();
+    if opts.mode.is_no_submit() || ctx.config.uses_external_signer() {
+        let labels = trade_call_labels(leading.len());
         let mut calls = leading;
         calls.extend(
             writer
@@ -2382,19 +2242,44 @@ pub(crate) async fn submit_lognormal_quote(
                 .await
                 .map_err(|e| anyhow::anyhow!("build trade calls: {e}"))?,
         );
-        let result = dry_run_render(market, writer.account(), &calls).await;
-        if opts.mode == SubmitMode::EmitCalldata {
+        let simulation = simulate_calls("trade(dry-run)", market, writer.account(), &calls).await;
+        if opts.mode == WriteMode::EmitCalldata {
             let account_address = deadeye_starknet::Account::address(writer.account());
             return Ok(SubmitOutcome::EmitCalldata(calldata_result(
-                opts.label,
-                market,
-                account_address,
-                &calls,
-                leading_count,
-                &result,
+                CalldataInput {
+                    action: "trade(emit-calldata)",
+                    family: Some(opts.label),
+                    target: market,
+                    account: account_address,
+                    calls: &calls,
+                    labels: &labels,
+                    simulation: &simulation,
+                    computed_collateral: Some(Sq128::from_raw(quote.required_collateral).to_f64()),
+                },
             )));
         }
-        return Ok(SubmitOutcome::DryRun(result));
+        if ctx.config.uses_external_signer() {
+            if !simulation.accepted {
+                return Ok(SubmitOutcome::PreflightRejected(simulation));
+            }
+            let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
+            let required_net_xp = Sq128::from_raw(quote.required_collateral).to_f64();
+            let submission = submit_external_calls(
+                ctx,
+                "trade",
+                market,
+                deadeye_starknet::Account::address(writer.account()),
+                &calls,
+                &labels,
+            )
+            .await?;
+            return Ok(SubmitOutcome::Submitted {
+                result: submission,
+                supplied_gross_xp,
+                required_net_xp,
+            });
+        }
+        return Ok(SubmitOutcome::DryRun(simulation));
     }
 
     let supplied_gross_xp = Sq128::from_raw(quote.padded_collateral).to_f64();
@@ -2460,52 +2345,6 @@ fn journal_cmd(ctx: &AppContext, args: TradeJournalArgs) -> Result<()> {
         },
     }
     Ok(())
-}
-
-/// Convert a fee in FRI (10⁻¹⁸ STRK) to a human STRK amount for display.
-fn fri_to_strk(fri: u128) -> f64 {
-    #[expect(clippy::cast_precision_loss, reason = "fee is for display only")]
-    let strk = fri as f64 / 1e18_f64;
-    strk
-}
-
-/// Run a **gas-free** chain simulation of the `[approve, trade]` multicall and
-/// render the verdict — the `--dry-run` path. Never submits.
-async fn dry_run_render<A: Account>(market: Felt, account: &A, calls: &[Call]) -> SubmissionResult {
-    let market_s = format!("{market:#x}");
-    let base = |accepted: bool, note: String| SubmissionResult {
-        action: "trade(dry-run)",
-        market: market_s.clone(),
-        tx_hash: None,
-        call_count: Some(calls.len()),
-        accepted,
-        rejection: None,
-        note: Some(note),
-    };
-    match account.simulate(calls).await {
-        Ok(Some(sim)) => match sim.revert_reason {
-            Some(reason) => base(
-                false,
-                format!(
-                    "DRY RUN — multicall WOULD REVERT on-chain: {reason}. \
-                     No transaction submitted, no gas spent."
-                ),
-            ),
-            None => base(
-                true,
-                format!(
-                    "DRY RUN — simulation OK (≈{:.6} STRK est. fee). \
-                     Re-run without --dry-run to submit.",
-                    fri_to_strk(sim.estimated_fee)
-                ),
-            ),
-        },
-        Ok(None) => base(
-            false,
-            "DRY RUN — this account type cannot simulate (no provider-backed signer).".into(),
-        ),
-        Err(e) => base(false, format!("DRY RUN — simulation call failed: {e}")),
-    }
 }
 
 pub(crate) fn default_journal_path() -> Result<std::path::PathBuf> {

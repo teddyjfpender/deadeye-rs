@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result};
 use deadeye_core::Sq128;
 use deadeye_sdk::bulk::Family;
 use deadeye_starknet::{
-    Account as _, BivariateMarketReader, BivariateMarketWriter, Call, LognormalMarketReader,
+    Account, BivariateMarketReader, BivariateMarketWriter, Call, Felt, LognormalMarketReader,
     LognormalMarketWriter, MultinoulliMarketReader, MultinoulliMarketWriter, NormalMarketReader,
     NormalMarketWriter, build_erc20_approve_call, collateral_allowance_base_units,
     types::common::AmmConfigRaw,
@@ -13,8 +13,12 @@ use deadeye_starknet::{
 use crate::{
     cli::{LpAddArgs, LpCmd, LpRemoveArgs},
     commands::{
+        call_bundle::{
+            CalldataInput, WriteMode, build_write_account, calldata_result, labels,
+            print_calldata_json, simulate_calls, submit_external_calls,
+        },
         render_helpers::{submission_from_receipt, submission_from_trade_error},
-        runtime_resolver::{build_owned_account, build_provider, family_label, parse_felt},
+        runtime_resolver::{build_provider, family_label, parse_felt},
     },
     context::AppContext,
     output::OutputMode,
@@ -48,10 +52,14 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
         super::confirm_or_bail("Continue?")?;
     }
 
-    let account = build_owned_account(ctx)?;
+    let mode = if args.emit_calldata {
+        WriteMode::EmitCalldata
+    } else {
+        WriteMode::Submit
+    };
+    let account = build_write_account(ctx, mode)?;
     let writer_provider = build_provider(ctx)?;
     let share_amount = Sq128::from_f64(args.amount)?.to_raw();
-    let market_hex = format!("{market:#x}");
 
     // The deposit pulls collateral via `transfer_from`, so the multicall must
     // lead with an ERC-20 approve of the collateral token to the market —
@@ -63,7 +71,7 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
         build_erc20_approve_call(config.collateral_token, market, amount)
     };
 
-    let result = match family {
+    match family {
         Family::Normal => {
             let writer =
                 NormalMarketWriter::new(NormalMarketReader::new(&writer_provider, market), account);
@@ -76,14 +84,7 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
                 approve_for(&config),
                 writer.build_add_liquidity_call(share_amount),
             ];
-            match writer.account().execute(calls).await {
-                Ok(receipt) => submission_from_receipt("lp_add", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_add",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            return finish_lp_calls(ctx, "lp_add", market, writer.account(), calls, mode).await;
         },
         Family::Lognormal => {
             let writer = LognormalMarketWriter::new(
@@ -99,14 +100,7 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
                 approve_for(&config),
                 writer.build_add_liquidity_call(share_amount),
             ];
-            match writer.account().execute(calls).await {
-                Ok(receipt) => submission_from_receipt("lp_add", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_add",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            return finish_lp_calls(ctx, "lp_add", market, writer.account(), calls, mode).await;
         },
         Family::Multinoulli => {
             let _ = (writer_provider, account, share_amount);
@@ -135,17 +129,9 @@ async fn add(ctx: &AppContext, args: LpAddArgs, confirm: bool) -> Result<()> {
                 approve_for(&config),
                 writer.build_add_liquidity_call(share_amount),
             ];
-            match writer.account().execute(calls).await {
-                Ok(receipt) => submission_from_receipt("lp_add", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_add",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            return finish_lp_calls(ctx, "lp_add", market, writer.account(), calls, mode).await;
         },
-    };
-    ctx.renderer.print(&result)
+    }
 }
 
 async fn remove(ctx: &AppContext, args: LpRemoveArgs, confirm: bool) -> Result<()> {
@@ -196,39 +182,31 @@ async fn remove(ctx: &AppContext, args: LpRemoveArgs, confirm: bool) -> Result<(
         super::confirm_or_bail("Continue?")?;
     }
 
-    let account = build_owned_account(ctx)?;
+    let mode = if args.emit_calldata {
+        WriteMode::EmitCalldata
+    } else {
+        WriteMode::Submit
+    };
+    let account = build_write_account(ctx, mode)?;
     let share_amount = Sq128::from_f64(share_amount_f64)?.to_raw();
     let writer_provider_for_write = build_provider(ctx)?;
-    let market_hex = format!("{market:#x}");
 
-    let result = match family {
+    match family {
         Family::Normal => {
             let writer = NormalMarketWriter::new(
                 NormalMarketReader::new(&writer_provider_for_write, market),
                 account,
             );
-            match writer.remove_liquidity(share_amount).await {
-                Ok(receipt) => submission_from_receipt("lp_remove", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_remove",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            let calls = vec![writer.build_remove_liquidity_call(share_amount)];
+            return finish_lp_calls(ctx, "lp_remove", market, writer.account(), calls, mode).await;
         },
         Family::Lognormal => {
             let writer = LognormalMarketWriter::new(
                 LognormalMarketReader::new(&writer_provider_for_write, market),
                 account,
             );
-            match writer.remove_liquidity(share_amount).await {
-                Ok(receipt) => submission_from_receipt("lp_remove", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_remove",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            let calls = vec![writer.build_remove_liquidity_call(share_amount)];
+            return finish_lp_calls(ctx, "lp_remove", market, writer.account(), calls, mode).await;
         },
         Family::Multinoulli => {
             let _ = (writer_provider_for_write, account, share_amount);
@@ -243,15 +221,59 @@ async fn remove(ctx: &AppContext, args: LpRemoveArgs, confirm: bool) -> Result<(
                 BivariateMarketReader::new(&writer_provider_for_write, market),
                 account,
             );
-            match writer.remove_liquidity(share_amount).await {
-                Ok(receipt) => submission_from_receipt("lp_remove", market_hex, receipt),
-                Err(e) => submission_from_trade_error(
-                    "lp_remove",
-                    market_hex,
-                    &deadeye_starknet::TradeError::from_contract(e),
-                ),
-            }
+            let calls = vec![writer.build_remove_liquidity_call(share_amount)];
+            return finish_lp_calls(ctx, "lp_remove", market, writer.account(), calls, mode).await;
         },
+    }
+}
+
+async fn finish_lp_calls<A>(
+    ctx: &AppContext,
+    action: &'static str,
+    market: Felt,
+    account: &A,
+    calls: Vec<Call>,
+    mode: WriteMode,
+) -> Result<()>
+where
+    A: Account,
+{
+    let call_labels = match action {
+        "lp_add" => labels(["approve", "add_liquidity"]),
+        "lp_remove" => labels(["remove_liquidity"]),
+        _ => labels(["unknown"]),
+    };
+    if mode == WriteMode::EmitCalldata {
+        let sim = simulate_calls("lp(preflight)", market, account, &calls).await;
+        let result = calldata_result(CalldataInput {
+            action: "lp(emit-calldata)",
+            family: None,
+            target: market,
+            account: account.address(),
+            calls: &calls,
+            labels: &call_labels,
+            simulation: &sim,
+            computed_collateral: None,
+        });
+        return print_calldata_json(&result);
+    }
+    let result = if ctx.config.uses_external_signer() {
+        let sim = simulate_calls("lp(preflight)", market, account, &calls).await;
+        if sim.accepted {
+            submit_external_calls(ctx, action, market, account.address(), &calls, &call_labels)
+                .await?
+        } else {
+            sim
+        }
+    } else {
+        match account.execute(calls).await {
+            Ok(receipt) => submission_from_receipt(action, format!("{market:#x}"), receipt),
+            Err(e) => submission_from_trade_error(
+                action,
+                format!("{market:#x}"),
+                &deadeye_starknet::TradeError::from_contract(e),
+            ),
+        }
     };
     ctx.renderer.print(&result)
 }

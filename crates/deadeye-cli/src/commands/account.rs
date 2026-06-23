@@ -110,21 +110,26 @@ fn derive(ctx: &AppContext, args: AccountDeriveArgs) -> Result<()> {
                 existing = existing.address.as_deref().unwrap_or("address unknown"),
             );
         }
-        cfg.profiles.insert(name.clone(), config::ProfileConfig {
-            rpc_url: parent.rpc_url.clone(),
-            indexer_url: parent.indexer_url.clone(),
-            chain_id: parent.chain_id.clone(),
-            address: Some(address.clone()),
-            strk_token: parent.strk_token.clone(),
-            private_key: Some(format!("{:#066x}", w.private_key)),
-            // The parent's phrase recovers this account — don't duplicate
-            // seed material across profiles.
-            mnemonic: None,
-            account_class_hash: Some(class_hash_hex.clone()),
-            account_deployed: false,
-            derivation_index: Some(index),
-            derived_from: Some(parent_name.clone()),
-        });
+        cfg.profiles.insert(
+            name.clone(),
+            config::ProfileConfig {
+                rpc_url: parent.rpc_url.clone(),
+                indexer_url: parent.indexer_url.clone(),
+                chain_id: parent.chain_id.clone(),
+                address: Some(address.clone()),
+                strk_token: parent.strk_token.clone(),
+                signer: parent.signer.clone(),
+                external_signer: parent.external_signer.clone(),
+                private_key: Some(format!("{:#066x}", w.private_key)),
+                // The parent's phrase recovers this account — don't duplicate
+                // seed material across profiles.
+                mnemonic: None,
+                account_class_hash: Some(class_hash_hex.clone()),
+                account_deployed: false,
+                derivation_index: Some(index),
+                derived_from: Some(parent_name.clone()),
+            },
+        );
         rows.push(DerivedRow {
             profile: name,
             index,

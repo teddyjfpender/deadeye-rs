@@ -105,6 +105,11 @@ deadeye trade execute 0xMARKET --family normal --mean 4.18 --variance 0.04 \
     --max-collateral 100 --emit-calldata --output json
 ```
 
+Address-only profiles can also submit through a wallet companion:
+`signer = "external"` plus `[profiles.<name>.external_signer]` routes validated
+multicalls through the built-in strkd adapter. See
+[`docs/EXTERNAL_SIGNERS.md`](docs/EXTERNAL_SIGNERS.md).
+
 **Family auto-detection.** Normal and lognormal AMMs are wire-identical on
 every shared view call, so the CLI never probes a reader to guess the family —
 it resolves it semantically (indexer `marketType` → class hash → factory

@@ -43,6 +43,22 @@ fn trade_execute_help_mentions_emit_calldata() {
 }
 
 #[test]
+fn universal_write_help_mentions_emit_calldata() {
+    for args in [
+        &["lp", "add", "--help"][..],
+        &["lp", "remove", "--help"][..],
+        &["claim", "--help"][..],
+        &["collateral", "claim-grant", "--help"][..],
+    ] {
+        deadeye()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(contains("--emit-calldata"));
+    }
+}
+
+#[test]
 fn trade_execute_emit_calldata_conflicts_with_dry_run() {
     deadeye()
         .args([

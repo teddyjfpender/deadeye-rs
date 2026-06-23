@@ -32,6 +32,7 @@ use tokio::sync::Notify;
 use crate::{
     cli::TradeLoopArgs,
     commands::{
+        call_bundle::WriteMode,
         render_helpers::RejectionExplanation,
         runtime_resolver::{
             build_owned_account, build_provider, family_label, parse_felt, resolve_family,
@@ -39,7 +40,7 @@ use crate::{
         },
         trade::{
             COLLATERAL_BUFFER, NormalSolveOutcome, NormalSubmitOptions, SubmitOutcome,
-            SubmitMode, solve_lognormal_candidate, solve_normal_candidate, submit_lognormal_quote,
+            solve_lognormal_candidate, solve_normal_candidate, submit_lognormal_quote,
             submit_normal_quote,
         },
     },
@@ -919,7 +920,7 @@ async fn run_tick(
     }
     let opts = NormalSubmitOptions {
         max_collateral: effective_ceiling,
-        mode: SubmitMode::Submit,
+        mode: WriteMode::Submit,
         runtime,
         x_star_override: None,
         journal: Some(crate::commands::trade::default_journal_path()?),
@@ -929,7 +930,7 @@ async fn run_tick(
     };
     if args.dry_run_first {
         let dry_opts = NormalSubmitOptions {
-            mode: SubmitMode::DryRun,
+            mode: WriteMode::DryRun,
             journal: None,
             ..opts.clone()
         };

@@ -658,6 +658,10 @@ pub(crate) struct LpAddArgs {
     /// Amount of LP shares to add (in STRK-equivalent units).
     #[arg(long)]
     pub(crate) amount: f64,
+    /// Build, simulate, and print the validated account multicall JSON instead
+    /// of signing. No private key required.
+    #[arg(long)]
+    pub(crate) emit_calldata: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -671,6 +675,10 @@ pub(crate) struct LpRemoveArgs {
     /// Fraction of LP shares to remove (0 < f ≤ 1).
     #[arg(long)]
     pub(crate) fraction: f64,
+    /// Build, simulate, and print the validated account multicall JSON instead
+    /// of signing. No private key required.
+    #[arg(long)]
+    pub(crate) emit_calldata: bool,
 }
 
 /// `deadeye collateral …`
@@ -714,6 +722,10 @@ pub(crate) struct CollateralClaimGrantArgs {
     /// the pre-flight reads and prints the plan but never signs.
     #[arg(long)]
     pub(crate) execute: bool,
+    /// Build, simulate, and print the validated claim multicall JSON instead
+    /// of signing. No private key required.
+    #[arg(long, conflicts_with = "execute")]
+    pub(crate) emit_calldata: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -739,6 +751,10 @@ pub(crate) struct ClaimArgs {
     /// Force family.
     #[arg(long)]
     pub(crate) family: Option<FamilyArg>,
+    /// Build, simulate, and print the validated claim multicall JSON instead
+    /// of signing. No private key required.
+    #[arg(long)]
+    pub(crate) emit_calldata: bool,
 }
 
 /// `deadeye admin …`
