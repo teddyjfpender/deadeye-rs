@@ -154,9 +154,9 @@ mod owned {
 
         /// Construct an address-only account for skip-validation simulations.
         ///
-        /// The account can run [`Self::simulate_calls`] and chain-probe helpers,
-        /// but any real submission fails before broadcast because the signer
-        /// intentionally cannot produce signatures.
+        /// The account can run [`Self::simulate_calls`] and chain-probe
+        /// helpers, but any real submission fails before broadcast
+        /// because the signer intentionally cannot produce signatures.
         #[must_use]
         pub fn for_simulation(
             client: JsonRpcClient<HttpTransport>,

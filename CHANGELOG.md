@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing unreleased — the latest tagged release is below._
 
+## [0.1.24] - 2026-06-23
+
+### Fixed
+
+- Refreshed the `bitcoin_hashes` lockfile entry away from a yanked transitive
+  version pulled by `bip39`, restoring cargo-deny release hygiene.
+- Applied the nightly rustfmt shape expected by CI for the external-signer
+  profile derivation path and address-only simulation account docs.
+
 ## [0.1.23] - 2026-06-23
 
 ### Added
