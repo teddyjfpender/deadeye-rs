@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing unreleased — the latest tagged release is below._
 
+## [0.1.25] - 2026-06-25
+
+### Fixed
+
+- External signer `skip-estimate` submissions now derive explicit resource-bound
+  prices from the current Starknet block, with padding, instead of using stale
+  hardcoded L1/L1-data gas price ceilings. This fixes strkd validation failures
+  when mainnet gas prices exceed the old defaults (#64).
+
 ## [0.1.24] - 2026-06-23
 
 ### Fixed

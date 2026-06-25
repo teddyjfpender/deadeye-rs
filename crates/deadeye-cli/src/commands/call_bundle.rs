@@ -13,7 +13,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use deadeye_starknet::{Account, Call, GasParams};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use starknet_core::types::Felt;
+use starknet_core::types::{
+    BlockId, BlockTag, Felt, MaybePreConfirmedBlockWithTxHashes, ResourcePrice,
+};
+use starknet_providers::{JsonRpcClient, jsonrpc::HttpTransport};
 
 use crate::{
     commands::{render_helpers::SubmissionResult, runtime_resolver::build_simulation_account},
@@ -318,7 +321,13 @@ pub(crate) async fn submit_external_calls(
     }
     let client = StrkdClient::from_config(config)?;
     let result = client
-        .add_invoke_transaction(&ctx.config.chain_id, account, calls, labels)
+        .add_invoke_transaction(
+            &ctx.config.rpc_url,
+            &ctx.config.chain_id,
+            account,
+            calls,
+            labels,
+        )
         .await?;
     Ok(SubmissionResult {
         action,
@@ -397,6 +406,7 @@ impl StrkdClient {
 
     async fn add_invoke_transaction(
         &self,
+        rpc_url: &str,
         chain_id: &str,
         account: Felt,
         calls: &[Call],
@@ -412,7 +422,8 @@ impl StrkdClient {
             .allowance_strategy
             .eq_ignore_ascii_case("skip-estimate")
         {
-            params["resource_bounds"] = resource_bounds_json();
+            let gas = current_gas_params(rpc_url).await?;
+            params["resource_bounds"] = resource_bounds_json(gas);
         }
         let body = json!({
             "jsonrpc": "2.0",
@@ -459,6 +470,99 @@ impl StrkdClient {
     }
 }
 
+const RESOURCE_PRICE_SAFETY_MULTIPLIER: u128 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResourcePrices {
+    l1_gas_price: u128,
+    l2_gas_price: u128,
+    l1_data_gas_price: u128,
+}
+
+async fn current_gas_params(rpc_url: &str) -> Result<GasParams> {
+    let url = url::Url::parse(rpc_url)
+        .with_context(|| format!("rpc_url is not a valid URL: {rpc_url}"))?;
+    let provider = JsonRpcClient::new(HttpTransport::new(url));
+    let prices = current_resource_prices(&provider).await?;
+    Ok(gas_params_with_resource_prices(prices))
+}
+
+async fn current_resource_prices<P>(provider: &P) -> Result<ResourcePrices>
+where
+    P: starknet_providers::Provider + Sync,
+{
+    match provider
+        .get_block_with_tx_hashes(BlockId::Tag(BlockTag::PreConfirmed))
+        .await
+    {
+        Ok(block) => resource_prices_from_block(block),
+        Err(preconfirmed_err) => {
+            let block = provider
+                .get_block_with_tx_hashes(BlockId::Tag(BlockTag::Latest))
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching Starknet gas prices from pre_confirmed failed \
+                         ({preconfirmed_err}); latest fallback also failed"
+                    )
+                })?;
+            resource_prices_from_block(block)
+        },
+    }
+}
+
+fn resource_prices_from_block(block: MaybePreConfirmedBlockWithTxHashes) -> Result<ResourcePrices> {
+    match block {
+        MaybePreConfirmedBlockWithTxHashes::Block(block) => resource_prices_from_starknet_fields(
+            &block.l1_gas_price,
+            &block.l2_gas_price,
+            &block.l1_data_gas_price,
+        ),
+        MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(block) => {
+            resource_prices_from_starknet_fields(
+                &block.l1_gas_price,
+                &block.l2_gas_price,
+                &block.l1_data_gas_price,
+            )
+        },
+    }
+}
+
+fn resource_prices_from_starknet_fields(
+    l1_gas: &ResourcePrice,
+    l2_gas: &ResourcePrice,
+    l1_data_gas: &ResourcePrice,
+) -> Result<ResourcePrices> {
+    Ok(ResourcePrices {
+        l1_gas_price: resource_price_fri("l1_gas", l1_gas)?,
+        l2_gas_price: resource_price_fri("l2_gas", l2_gas)?,
+        l1_data_gas_price: resource_price_fri("l1_data_gas", l1_data_gas)?,
+    })
+}
+
+fn resource_price_fri(name: &str, price: &ResourcePrice) -> Result<u128> {
+    u128::try_from(price.price_in_fri)
+        .with_context(|| format!("{name} price_in_fri does not fit in u128"))
+}
+
+fn gas_params_with_resource_prices(prices: ResourcePrices) -> GasParams {
+    let mut gas = GasParams::generous_defaults();
+    gas.l1_gas_price = gas
+        .l1_gas_price
+        .max(padded_resource_price(prices.l1_gas_price));
+    gas.l2_gas_price = gas
+        .l2_gas_price
+        .max(padded_resource_price(prices.l2_gas_price));
+    gas.l1_data_gas_price = gas
+        .l1_data_gas_price
+        .max(padded_resource_price(prices.l1_data_gas_price));
+    gas
+}
+
+const fn padded_resource_price(price: u128) -> u128 {
+    price.saturating_mul(RESOURCE_PRICE_SAFETY_MULTIPLIER)
+}
+
 fn wallet_calls(calls: &[Call], labels: &[String]) -> Vec<serde_json::Value> {
     calls
         .iter()
@@ -474,8 +578,7 @@ fn wallet_calls(calls: &[Call], labels: &[String]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn resource_bounds_json() -> serde_json::Value {
-    let gas = GasParams::generous_defaults();
+fn resource_bounds_json(gas: GasParams) -> serde_json::Value {
     json!({
         "l1_gas": {
             "max_amount": format!("{:#x}", gas.l1_gas),
@@ -641,5 +744,56 @@ mod tests {
         assert_eq!(value["entrypoint"], "approve");
         assert_eq!(value["entry_point_selector"], "0x456");
         assert_eq!(value["selector"], "0x456");
+    }
+
+    #[test]
+    fn gas_params_use_live_resource_prices_with_default_floor() {
+        let gas = gas_params_with_resource_prices(ResourcePrices {
+            l1_gas_price: 109_210_567_966_765,
+            l2_gas_price: 1,
+            l1_data_gas_price: 77_000_000_000_000,
+        });
+
+        assert_eq!(gas.l1_gas, 10_000);
+        assert_eq!(gas.l1_gas_price, 218_421_135_933_530);
+        assert_eq!(gas.l2_gas, 100_000_000);
+        assert_eq!(gas.l2_gas_price, 100_000_000_000);
+        assert_eq!(gas.l1_data_gas, 10_000);
+        assert_eq!(gas.l1_data_gas_price, 154_000_000_000_000);
+    }
+
+    #[test]
+    fn resource_bounds_json_serializes_supplied_prices() {
+        let gas = gas_params_with_resource_prices(ResourcePrices {
+            l1_gas_price: 109_210_567_966_765,
+            l2_gas_price: 60_000_000_000,
+            l1_data_gas_price: 77_000_000_000_000,
+        });
+        let value = resource_bounds_json(gas);
+
+        assert_eq!(
+            value["l1_gas"]["max_price_per_unit"],
+            format!("{:#x}", 218_421_135_933_530_u128)
+        );
+        assert_eq!(
+            value["l2_gas"]["max_price_per_unit"],
+            format!("{:#x}", 120_000_000_000_u128)
+        );
+        assert_eq!(
+            value["l1_data_gas"]["max_price_per_unit"],
+            format!("{:#x}", 154_000_000_000_000_u128)
+        );
+    }
+
+    #[test]
+    fn resource_price_fri_rejects_values_larger_than_u128() {
+        let price = ResourcePrice {
+            price_in_fri: Felt::from_hex("0x100000000000000000000000000000000")
+                .expect("valid felt"),
+            price_in_wei: Felt::ZERO,
+        };
+
+        let err = resource_price_fri("l1_gas", &price).expect_err("overflow rejected");
+        assert!(err.to_string().contains("does not fit in u128"));
     }
 }

@@ -93,5 +93,6 @@ allowance_strategy = "skip-estimate"
 ```
 
 This includes explicit resource bounds in the wallet request so the wallet does
-not need to estimate through the stale allowance state. The bounds are generous;
-unused gas is refunded by Starknet.
+not need to estimate through the stale allowance state. The gas amounts are
+generous, while the max prices are derived from the current Starknet block and
+padded before submission; unused gas is refunded by Starknet.
